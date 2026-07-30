@@ -30,6 +30,17 @@ sudo ./install.sh --profile=8gb    # 8GB card → 64GB unlock
 sudo ./install.sh --profile=10gb   # 10GB card → 40GB unlock
 ```
 
+To change the HBM memory clock, use `--mclk-ndiv` (multiplier × 27 MHz, any VBIOS,
+both `0x20C2` and `0x2082`):
+
+```bash
+sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
+```
+
+Stock is NDIV 64 on 8GB 300W VBIOS, 54 on 8GB 250W, 45 on 10GB. Without the flag
+the overclock patches are not applied at all. See the README for the full table
+and the recovery path if a value turns out unstable.
+
 Then perform a cold reboot (full power off, then boot).
 
 ## Uninstall

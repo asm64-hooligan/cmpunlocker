@@ -26,6 +26,19 @@ pcie:
   opt_gen23_addr: "0x0082057c"
   opt_magic_a100: "0x00200000"
 
+mclk_overclock:
+  supported_device_ids:
+    - "20c2"
+    - "2082"
+  ndiv_min: 30
+  ndiv_max: 80
+  mhz_per_ndiv: 27
+  stock_ndiv:
+    "10gb": 45          # 1215 MHz
+    "8gb_250w": 54      # 1458 MHz
+    "8gb_300w": 64      # 1728 MHz, VBIOS 92.00.6D.00.0A
+  comment: "HBM2 memory clock via the FBPA PLL NDIV. The patches ship an XX placeholder that build.sh substitutes from --mclk-ndiv."
+
 profiles:
   "8gb":
     stock_mib: 8192
