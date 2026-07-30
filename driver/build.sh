@@ -77,7 +77,7 @@ if [[ -n "${MCLK_NDIV}" ]]; then
 fi
 for p in "${patches[@]}"; do
     base="$(basename "${p}")"
-    if [[ ("${base}" == "0009-mclk-overclock.patch" || "${base}" == "0010-mclk-overclock-post-gsp.patch") && -z "${MCLK_NDIV}" ]]; then
+    if [[ ("${base}" == "0008-mclk-overclock.patch" || "${base}" == "0009-mclk-overclock-post-gsp.patch") && -z "${MCLK_NDIV}" ]]; then
         warn "Skipping ${base} (no --mclk-ndiv)"
         continue
     fi

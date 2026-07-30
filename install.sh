@@ -9,34 +9,25 @@ mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 
 PROFILE_OVERRIDE=""
-CONFIGURE_IOMMU=1
-CONFIGURE_GEN2_SERVICE=1
+CONFIGURE_IOMMU=0
 MCLK_NDIV=""
 for arg in "$@"; do
     case "${arg}" in
         --profile=8gb|--profile=8GB) PROFILE_OVERRIDE="8gb" ;;
         --profile=10gb|--profile=10GB) PROFILE_OVERRIDE="10gb" ;;
-        --no-iommu) CONFIGURE_IOMMU=0 ;;
-        --no-gen2-service) CONFIGURE_GEN2_SERVICE=0 ;;
+        --iommu) CONFIGURE_IOMMU=1 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--profile=8gb|10gb] [--no-iommu] [--no-gen2-service]
-                         [--mclk-ndiv=N]
+Usage: sudo ./install.sh [--profile=8gb|10gb] [--iommu] [--mclk-ndiv=N]
 
   --profile=8gb   Force 8GB metadata label (geometry is still chosen per PCI ID)
   --profile=10gb  Force 10GB metadata label (geometry is still chosen per PCI ID)
-  --no-iommu      Do not touch the kernel command line (leave IOMMU settings alone)
-  --no-gen2-service
-                  Do not install the early-boot PCIe Gen2 retrain service
+  --iommu         Add iommu=pt to the kernel command line (see README for details)
   --mclk-ndiv=N   HBM memory clock: set PLL multiplier (30-80), N * 27 MHz.
                   Works on any VBIOS, on both 0x20C2 and 0x2082. Stock is 64 on
                   8GB 300W, 54 on 8GB 250W, 45 on 10GB. Without this flag the
                   overclock patches are not applied at all.
-
-By default the installer appends intel_iommu=on / amd_iommu=on plus iommu=pt to
-the kernel command line so the IOMMU runs in passthrough mode. This takes effect
-on the next reboot.
 
 Without --profile, each unlockable GPU is classified by PCI device ID:
   10de:20c2 → 8gb / 64GB unlock
@@ -306,33 +297,7 @@ CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
     "${SCRIPT_DIR}/driver/build.sh"
 ok "Patched modules installed (profile ${CARD_PROFILE})"
 
-step "Step 5b/6: Configuring PCIe Gen2"
-cat > /etc/modprobe.d/cmp-pcie-gen2.conf <<'EOF'
-options nvidia NVreg_RegistryDwords="RmForceEnableGen2=1;RMPcieLinkSpeed=0x1"
-EOF
-ok "Wrote /etc/modprobe.d/cmp-pcie-gen2.conf"
-
-for legacy_unit in cmpretrain.service cmp-gen2-retrain.service; do
-    systemctl disable --now "${legacy_unit}" 2>/dev/null || true
-    systemctl reset-failed "${legacy_unit}" 2>/dev/null || true
-done
-rm -f /etc/systemd/system/cmpretrain.service \
-      /etc/systemd/system/cmp-gen2-retrain.service \
-      /usr/local/sbin/retrain.sh \
-      /usr/local/sbin/cmp-gen2-retrain.sh
-systemctl daemon-reload
-ok "Removed legacy PCIe retrain helpers"
-
-if (( CONFIGURE_GEN2_SERVICE == 1 )); then
-    chmod +x "${SCRIPT_DIR}/tools/hammer.sh" \
-             "${SCRIPT_DIR}/tools/service.sh"
-    "${SCRIPT_DIR}/tools/service.sh" install
-    ok "Early-boot Gen2 retrain service armed (not started in this session)"
-else
-    warn "--no-gen2-service given; early-boot PCIe retraining is not installed"
-fi
-
-step "Step 5c/6: Configuring IOMMU (passthrough)"
+step "Step 5b/6: Configuring IOMMU (passthrough)"
 IOMMU_STATUS="skipped"
 IOMMU_PARAMS=""
 
@@ -473,7 +438,7 @@ configure_iommu_kernel_cmdline() {
 }
 
 if (( CONFIGURE_IOMMU == 0 )); then
-    warn "--no-iommu given; leaving kernel command line untouched"
+    info "IOMMU: not requested (use --iommu to configure passthrough)"
 else
     IOMMU_PARAMS="$(iommu_params_for_cpu)"
     if [[ -z "${IOMMU_PARAMS}" ]]; then
@@ -532,10 +497,8 @@ echo -e "  5. Unlock logs: ${CYAN}sudo dmesg | grep SEC2_DEBUG${NC}"
 if [[ -n "${MCLK_NDIV}" ]]; then
     echo -e "     Memory clock logs: ${CYAN}sudo dmesg | grep HBMPLL_OC${NC}  (expect NDIV=${MCLK_NDIV})"
 fi
-echo -e "  6. Verify IOMMU after reboot: ${CYAN}cat /proc/cmdline${NC} and ${CYAN}ls /sys/class/iommu${NC}"
-if (( CONFIGURE_GEN2_SERVICE == 1 )); then
-    echo -e "  7. Verify negotiated Gen2: ${CYAN}sudo ./tools/service.sh verify${NC}"
-    echo -e "     Recovery boot option: ${CYAN}systemd.mask=gen2.service${NC}"
+if [[ -n "${IOMMU_PARAMS}" && "${IOMMU_STATUS}" != "skipped" ]]; then
+    echo -e "  6. Verify IOMMU after reboot: ${CYAN}cat /proc/cmdline${NC} and ${CYAN}ls /sys/class/iommu${NC}"
 fi
 echo ""
 echo "Log saved to: ${LOG_FILE}"

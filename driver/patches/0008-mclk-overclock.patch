@@ -1,6 +1,6 @@
---- a/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
-+++ b/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
-@@ -649,6 +649,144 @@
+--- a/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c	2026-07-31 00:17:22.670241348 +0200
++++ b/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c	2026-07-31 00:18:28.686969052 +0200
+@@ -611,6 +611,144 @@ kgspBootstrap_TU102
          }
      }
  

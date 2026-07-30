@@ -1,7 +1,6 @@
-diff -Naur a/src/nvidia/generated/g_kernel_gsp_nvoc.h b/src/nvidia/generated/g_kernel_gsp_nvoc.h
---- a/src/nvidia/generated/g_kernel_gsp_nvoc.h	2026-07-18 11:26:26.833302560 -0700
-+++ b/src/nvidia/generated/g_kernel_gsp_nvoc.h	2026-07-18 11:26:26.834341525 -0700
-@@ -544,6 +544,8 @@
+--- a/src/nvidia/generated/g_kernel_gsp_nvoc.h	2026-07-07 18:23:15.000000000 +0200
++++ b/src/nvidia/generated/g_kernel_gsp_nvoc.h	2026-07-31 00:43:24.962804310 +0200
+@@ -544,6 +544,8 @@ struct KernelGsp {
      RM_RISCV_UCODE_DESC *pGspRmBootUcodeDesc;
      MEMORY_DESCRIPTOR *pGspUCodeRadix3Descriptor;
      MEMORY_DESCRIPTOR *pSignatureMemdesc;
@@ -10,9 +9,8 @@ diff -Naur a/src/nvidia/generated/g_kernel_gsp_nvoc.h b/src/nvidia/generated/g_k
      GspSystemInfo *pSystemInfo;
      NvU32 regTableSize;
      PACKED_REGISTRY_TABLE *pRegTable;
-diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
---- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-18 11:26:26.827164897 -0700
-+++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-18 11:26:26.828254361 -0700
+--- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-07 18:23:15.000000000 +0200
++++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-31 00:43:51.261744520 +0200
 @@ -102,6 +102,23 @@
  
  #include "crashcat/crashcat_report.h"
@@ -37,7 +35,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
  
  struct MIG_CI_UPDATE_CALLBACK_PARAMS
  {
-@@ -4805,14 +4824,23 @@
+@@ -4805,14 +4822,23 @@ _kgspBootGspRm(OBJGPU *pGpu, KernelGsp *
      if (kgspIsWpr2Up_HAL(pGpu, pKernelGsp) &&
          (!pGpu->getProperty(pGpu, PDB_PROP_GPU_PREINITIALIZED_WPR_REGION)))
      {
@@ -64,7 +62,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      {
          // If the new FB layout requires a scrubber ucode to scrub additional space, prepare it now
          NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, _kgspPrepareScrubberImageIfNeeded(pGpu, pKernelGsp));
-@@ -4821,6 +4849,125 @@
+@@ -4821,6 +4847,130 @@ _kgspBootGspRm(OBJGPU *pGpu, KernelGsp *
      // Setup arguments for bootstrapping GSP
      NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, kgspPrepareForBootstrap_HAL(pGpu, pKernelGsp, KGSP_BOOT_MODE_NORMAL));
  
@@ -87,6 +85,11 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +            { 0x009a3c7cU, 0xffffffffU, "FBPA_PLL0" },
 +            { 0x009a3c80U, 0xffffffffU, "FBPA_PLL1" },
 +            { 0x009a3c84U, 0xffffffffU, "FBPA_PLL2" },
++            { 0x00088fe8U, 0xffffffffU, "XVE_PLM" },
++            { 0x00088fecU, 0xffffffffU, "XVE_CYA_PLM" },
++            { 0x0008872cU, 0x0000000aU, "XVE_FUSE_OVR" },
++            { 0x0008841cU, 0x4034ad00U, "XVE_CYA_SPD" },
++            { 0x000880a8U, 0x00000002U, "XVE_TARGET" },
 +        };
 +
 +        NvU32 wpr2Lo = GPU_REG_RD32(pGpu, 0x001fa824U);
@@ -190,7 +193,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      // Release the API lock if relaxed locking for parallel init is enabled
      NvBool bRelaxedLocking = _kgspShouldRelaxGspInitLocking(pGpu);
      if (bRelaxedLocking)
-@@ -5164,6 +5292,53 @@
+@@ -5164,6 +5314,53 @@ kgspInitRm_IMPL
          goto done;
      }
  
@@ -244,7 +247,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      NV_ASSERT_OK_OR_GOTO(status, kgspInitGspTraceCrashBuffer(pGpu, pKernelGsp), done);
  
      // Set PDB properties as per data from GSP.
-@@ -5662,6 +5834,84 @@
+@@ -5662,6 +5859,84 @@ _kgspFreeBootBinaryImage
      pKernelGsp->gspRmBootUcodeSize   = 0;
  }
  
@@ -329,7 +332,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
  static NV_STATUS
  _kgspCreateSignatureMemdesc
  (
-@@ -5672,6 +5922,9 @@
+@@ -5672,6 +5947,9 @@ _kgspCreateSignatureMemdesc
  {
      NV_STATUS status = NV_OK;
      NvU8 *pSignatureVa = NULL;
@@ -339,7 +342,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      NvU64 flags = MEMDESC_FLAGS_NONE;
  
      if (confComputeForceUnprotAlloc(pGpu))
-@@ -5682,7 +5935,7 @@
+@@ -5682,7 +5960,7 @@ _kgspCreateSignatureMemdesc
      // NOTE: align to 256 because that's the alignment needed for Booter DMA
      NV_CHECK_OK_OR_RETURN(LEVEL_ERROR,
          memdescCreate(&pKernelGsp->pSignatureMemdesc, pGpu,
@@ -348,7 +351,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
              NV_TRUE, ADDR_SYSMEM, NV_MEMORY_CACHED, flags));
  
      memdescTagAlloc(status,
-@@ -5694,8 +5947,48 @@
+@@ -5694,8 +5972,48 @@ _kgspCreateSignatureMemdesc
          (pSignatureVa != NULL) ? NV_OK : NV_ERR_INSUFFICIENT_RESOURCES,
          fail_alloc);
  
@@ -399,7 +402,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
  
      memdescUnmapInternal(pGpu, pKernelGsp->pSignatureMemdesc, 0);
      pSignatureVa = NULL;
-@@ -5709,6 +6002,69 @@
+@@ -5709,6 +6027,69 @@ fail_create:
      memdescDestroy(pKernelGsp->pSignatureMemdesc);
      pKernelGsp->pSignatureMemdesc = NULL;
  

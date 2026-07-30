@@ -1,6 +1,6 @@
---- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
-+++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
-@@ -5620,6 +5620,56 @@
+--- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-31 00:47:41.953643183 +0200
++++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c	2026-07-31 00:47:45.933556620 +0200
+@@ -5435,6 +5435,56 @@
  
      NV_CHECK_OK_OR_GOTO(status, LEVEL_ERROR, kgspStartLogPolling(pGpu, pKernelGsp), done);
  

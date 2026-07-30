@@ -69,9 +69,21 @@ sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
 
 Values below stock downclock the card, which is the way to stabilise a card that fails at stock.
 
-Without the flag, patches `0009` and `0010` are not applied at all. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB system the same multiplier lands on every card.
+Without the flag, patches `0008` and `0009` are not applied at all. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB system the same multiplier lands on every card.
 
 If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
+
+### IOMMU
+
+NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. In this mode, DMA between the GPU and system memory bypasses IOMMU translation, avoiding extra latency and potential mapping errors.
+
+The installer does **not** touch the kernel command line by default. To have it add `iommu=pt` automatically:
+
+```bash
+sudo ./install.sh --iommu
+```
+
+Or add `iommu=pt` to your kernel cmdline manually (via GRUB, systemd-boot, etc.). IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
 
 ## What Gets Unlocked
 

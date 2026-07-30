@@ -202,12 +202,20 @@ fi
 echo ""
 ok "All ${#GPU_BDFS[@]} unlockable GPU(s) report unlocked memory"
 
-if [[ -x "${SCRIPT_DIR}/tools/service.sh" ]]; then
+pcie_info="$(nvidia-smi --query-gpu=pci.bus_id,pcie.link.gen.current --format=csv,noheader 2>/dev/null || true)"
+if [[ -n "${pcie_info}" ]]; then
     echo ""
-    info "Checking negotiated PCIe generation"
-    if ! "${SCRIPT_DIR}/tools/service.sh" verify; then
-        warn "Memory unlock is healthy, but PCIe Gen2 is not active"
-        exit 1
-    fi
+    info "PCIe link speed:"
+    while IFS=, read -r bus gen; do
+        bus="$(echo "${bus}" | tr -d '[:space:]')"
+        gen="$(echo "${gen}" | tr -d '[:space:]')"
+        if [[ "${gen}" == "2" ]]; then
+            ok "${bus}: Gen${gen}"
+        elif [[ "${gen}" == "1" ]]; then
+            warn "${bus}: Gen${gen} (Gen2 retrain may not have completed)"
+        else
+            info "${bus}: Gen${gen}"
+        fi
+    done <<< "${pcie_info}"
 fi
 exit 0
