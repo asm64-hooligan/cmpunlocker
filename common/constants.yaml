@@ -37,6 +37,40 @@ mclk_overclock:
     "10gb": 45          # 1215 MHz
     "8gb_250w": 54      # 1458 MHz
     "8gb_300w": 64      # 1728 MHz, VBIOS 92.00.6D.00.0A
+  # PLM addresses opened by patch 0001 (SEC2 Booter) to allow PLL access
+  plm:
+    fbpa_pll0: "0x009a3c7c"     # value 0xffffffff
+    fbpa_pll1: "0x009a3c80"     # value 0xffffffff
+    fbpa_pll2: "0x009a3c84"     # value 0xffffffff
+  # Pre-GSP path (patch 0009, kernel_gsp_tu102.c)
+  pre_gsp:
+    fbpa0_pll_plm: "0x00903c7c"             # PLM readback, bit4 = PLL access open
+    fbpa0_pll_coeff: "0x00903c98"           # read stock NDIV from bits [15:8]
+    fbio_memclk_change_alert: "0x009a0590"  # bit31 = MEMCLK_CHANGE_ALERT
+    hbm_self_refresh: "0x009a031c"          # write 1 = enter, 0 = exit
+    fbpa_base: "0x00900000"
+    fbpa_stride: "0x00004000"
+    fbpa_count: 12
+    fbpa_pll_cfg_offset: "0x3c90"           # base + idx*stride + offset
+    fbpa_pll_coeff_offset: "0x3c98"         # base + idx*stride + offset, NDIV bits [15:8]
+    ddll_control: "0x009a11dc"              # bit6 = trigger DDLL calibration
+    ddll_cal_status0: "0x009a0674"
+    ddll_cal_status1: "0x009a0678"
+  # Post-GSP path (patch 0010, kernel_gsp.c)
+  post_gsp:
+    fbpa_multicast_pll_coeff: "0x0098bc98"  # multicast COEFF write (all FBPAs at once)
+    pri_fence: "0x001211fc"                 # PRI write fence, write 0x0 to flush
+    fbpa0_pll_cfg: "0x00903c90"             # poll bit5 for PLL lock
+  # COEFF register layout (shared by pre-GSP and post-GSP paths)
+  coeff_layout:
+    ndiv_shift: 8
+    ndiv_mask: "0x0000ff00"
+    preserve_mask: "0xffff00ff"             # MDIV/PDIV bits kept in read-modify-write
+    fallback_300w: "0x00010001"             # MDIV=1, PDIV=1 (used when PRI read returns 0 or BAD)
+  pll_cfg_bits:
+    enable: "0x09"                          # bits 0,3
+    lock: "0x20"                            # bit 5
+    ddll_reset: "0x1000"                    # bit 12
   comment: "HBM2 memory clock via the FBPA PLL NDIV. The patches ship an XX placeholder that build.sh substitutes from --mclk-ndiv."
 
 profiles:

@@ -37,8 +37,7 @@ both `0x20C2` and `0x2082`):
 sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
 ```
 
-Stock is NDIV 64 on 8GB 300W VBIOS, 54 on 8GB 250W, 45 on 10GB. Without the flag
-the overclock patches are not applied at all. See the README for the full table
+See the README for the full table
 and the recovery path if a value turns out unstable.
 
 Then perform a cold reboot (full power off, then boot).

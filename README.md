@@ -61,16 +61,17 @@ sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
 | NDIV | Frequency | Notes                           |
 |------|-----------|---------------------------------|
 | 45   | 1215 MHz  | Stock 10gb                      |
+| 60   | 1620 MHz  | Works on ~60% of 10gb cards     |
 | 54   | 1458 MHz  | Stock 8gb 250w vbios            |
 | 64   | 1728 MHz  | Stock 8gb 300w vbios            |
 | 70   | 1890 MHz  | Works on ~60% of 8gb cards      |
 | 73   | 1971 MHz  | Usually only on lucky 8gb cards |
 
-Values below stock downclock the card, which is the way to cut memory power or stabilise a card that fails at stock.
+Values below stock downclock the card, which is the way to stabilise a card that fails at stock.
 
-Without the flag, patches `0009` and `0010` are not applied at all and nothing touches the PLL. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB box the same multiplier lands on every card, so check each one with `sudo ./verify.sh` before trusting it.
+Without the flag, patches `0009` and `0010` are not applied at all. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB system the same multiplier lands on every card.
 
-If a value turns out to be unstable, boot is what breaks — reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
+If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
 
 ## What Gets Unlocked
 
