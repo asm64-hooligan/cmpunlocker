@@ -389,22 +389,56 @@ configure_iommu_grub() {
     fi
     ok "Set ${key}=\"${merged}\" (backup: ${grub_file}.cmpunlocker.bak)"
 
+    local regen_ok=1
     if command -v update-grub &>/dev/null; then
-        update-grub
+        update-grub || regen_ok=0
     elif command -v grub2-mkconfig &>/dev/null; then
-        local cfg="/boot/grub2/grub.cfg"
-        local efi_cfg
-        efi_cfg="$(ls /boot/efi/EFI/*/grub.cfg 2>/dev/null | head -1 || true)"
-        [[ -n "${efi_cfg}" ]] && cfg="${efi_cfg}"
-        grub2-mkconfig -o "${cfg}"
+        #
+        # On Fedora/RHEL /boot/efi/EFI/*/grub.cfg is a stub that chainloads
+        # /boot/grub2/grub.cfg, and grub2-mkconfig refuses to overwrite it.
+        # Prefer the real config; the EFI path is only it on older layouts.
+        #
+        local cfg=""
+        if [[ -f /boot/grub2/grub.cfg ]]; then
+            cfg="/boot/grub2/grub.cfg"
+        else
+            cfg="$(ls /boot/efi/EFI/*/grub.cfg 2>/dev/null | head -1 || true)"
+        fi
+        if [[ -n "${cfg}" ]]; then
+            grub2-mkconfig -o "${cfg}" || regen_ok=0
+        else
+            regen_ok=0
+        fi
     elif command -v grub-mkconfig &>/dev/null; then
-        grub-mkconfig -o /boot/grub/grub.cfg
+        grub-mkconfig -o /boot/grub/grub.cfg || regen_ok=0
     else
         warn "No grub config generator found — regenerate grub.cfg manually"
         IOMMU_STATUS="needs-grub-regen"
         return 0
     fi
+
+    if (( regen_ok == 0 )); then
+        warn "Could not regenerate grub.cfg — ${grub_file} is staged but inactive"
+        warn "Regenerate it yourself, or restore ${grub_file}.cmpunlocker.bak"
+        IOMMU_STATUS="needs-grub-regen"
+        return 0
+    fi
     ok "Regenerated GRUB config"
+
+    #
+    # BLS entries carry their own cmdline, and regenerating grub.cfg does not
+    # rewrite the ones that already exist — only new kernels would pick the
+    # parameters up. grubby patches the existing entries.
+    #
+    if [[ -d /boot/loader/entries ]] && command -v grubby &>/dev/null; then
+        if grubby --update-kernel=ALL --args="${IOMMU_PARAMS}"; then
+            ok "Updated existing boot entries via grubby"
+        else
+            warn "grubby could not update existing boot entries — only new kernels get ${IOMMU_PARAMS}"
+            IOMMU_STATUS="needs-grub-regen"
+            return 0
+        fi
+    fi
     IOMMU_STATUS="configured"
 }
 
