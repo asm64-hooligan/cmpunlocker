@@ -1,0 +1,59 @@
+--- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
++++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
+@@ -5620,6 +5620,56 @@
+ 
+     NV_CHECK_OK_OR_GOTO(status, LEVEL_ERROR, kgspStartLogPolling(pGpu, pKernelGsp), done);
+ 
++    // Post-GSP HBMPLL OC: multicast COEFF write + PRI_FENCE (matching v3)
++    {
++        NvU32 ocDevId = pGpu->idInfo.PCIDeviceID >> 16;
++        if (_kgspSec2PostblTimingEnabled(pGpu))
++        {
++            // XX is rewritten by driver/build.sh from --mclk-ndiv, and is left
++            // deliberately uncompilable so an unsubstituted tree cannot build.
++            static const NvU32 newNdiv = XX;
++            NvU32 coeff_pre = GPU_REG_RD32(pGpu, 0x00903C98U);
++            NvU32 plm_pre = GPU_REG_RD32(pGpu, 0x00903C7CU);
++            NvU32 newCoeff;
++            NvU32 cfg = 0;
++            NvU32 i;
++
++            //
++            // Keep the MDIV/PDIV the VBIOS programmed and swap NDIV only, so
++            // this works on any VBIOS. Fall back to the 300W layout if the
++            // read came back as a PRI error.
++            //
++            if (coeff_pre == 0 || (coeff_pre & 0xFFF00000U) == 0xBAD00000U)
++                newCoeff = (1U << 16) | (newNdiv << 8) | 1U;
++            else
++                newCoeff = (coeff_pre & ~0xFF00U) | ((newNdiv & 0xFFU) << 8);
++
++            NV_PRINTF(LEVEL_ERROR,
++                      "HBMPLL_OC: post-GSP PRE: COEFF=0x%08x(NDIV=%u) PLM=0x%08x "
++                      "devid=0x%04x vbios=%s newCOEFF=0x%08x\n",
++                      coeff_pre, (coeff_pre >> 8) & 0xFFU, plm_pre,
++                      ocDevId, pKernelGsp->vbiosVersionStr, newCoeff);
++
++            GPU_REG_WR32(pGpu, 0x0098BC98U, newCoeff);
++            GPU_REG_WR32(pGpu, 0x001211FCU, 0x0U);
++            for (i = 0; i < 500; i++)
++                (void)GPU_REG_RD32(pGpu, 0x00903C90U);
++
++            for (i = 0; i < 200000; i++)
++            {
++                cfg = GPU_REG_RD32(pGpu, 0x00903C90U);
++                if (cfg & 0x20U)
++                    break;
++            }
++
++            NV_PRINTF(LEVEL_ERROR,
++                      "HBMPLL_OC: post-GSP POST: COEFF=0x%08x(NDIV=%u) CFG=0x%08x lock=%u iter=%u\n",
++                      GPU_REG_RD32(pGpu, 0x00903C98U),
++                      (GPU_REG_RD32(pGpu, 0x00903C98U) >> 8) & 0xFFU,
++                      cfg, (cfg >> 5) & 1U, i);
++        }
++    }
++
+ done:
+     pKernelGsp->bInInit = NV_FALSE;
+ 

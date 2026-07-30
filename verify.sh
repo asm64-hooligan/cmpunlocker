@@ -176,9 +176,22 @@ else
     warn "No SEC2_DEBUG lines in dmesg (logs may have rotated; unlock can still be OK if memory is unlocked)"
 fi
 
+installed_ndiv="$(cat "${INSTALL_MOD_DIR}/mclk_ndiv" 2>/dev/null || echo 'none')"
+if [[ "${installed_ndiv}" != "none" && -n "${installed_ndiv}" ]]; then
+    echo ""
+    mclk_logs="$(dmesg 2>/dev/null | grep 'HBMPLL_OC' || true)"
+    if [[ -n "${mclk_logs}" ]]; then
+        ok "dmesg contains HBMPLL_OC logs (installed NDIV=${installed_ndiv}, $((installed_ndiv * 27)) MHz)"
+        printf '%s\n' "${mclk_logs}" | tail -n 6 | sed 's/^/  /'
+    else
+        warn "Installed with --mclk-ndiv=${installed_ndiv} but no HBMPLL_OC lines in dmesg"
+        warn "(logs may have rotated; otherwise the memory is still running at stock)"
+    fi
+fi
+
 echo ""
 if [[ -r "${INSTALL_MOD_DIR}/card_profile" ]]; then
-    info "Installed profile: $(cat "${INSTALL_MOD_DIR}/card_profile") / geometry: $(cat "${INSTALL_MOD_DIR}/unlock_geometry" 2>/dev/null || echo '?')"
+    info "Installed profile: $(cat "${INSTALL_MOD_DIR}/card_profile") / geometry: $(cat "${INSTALL_MOD_DIR}/unlock_geometry" 2>/dev/null || echo '?') / mclk_ndiv: ${installed_ndiv}"
 fi
 
 if (( failures > 0 )); then
