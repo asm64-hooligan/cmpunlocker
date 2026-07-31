@@ -2,38 +2,35 @@
 
 ## Overview
 
-cmpunlocker restores full  compute and memory capabilities to the NVIDIA CMP 170HX by patching the nvidia-open kernel modules. The unlock runs automatically during driver initialization and persists across reboots.
+The CMP 170HX is a full GA100 die — the same silicon as the A100 — with SM throttle, memory and PCIe link speed clamped in firmware. The clamps are enforced by PLM (Priv Level Mask) gates: registers that reject writes coming from the host, no matter how privileged the driver is.
 
-The CMP 170HX is physically a complete GA100 die (same silicon as the A100) but with compute and memory artificially restricted via firmware and OTP configuration. cmpunlocker bypasses these restrictions at the driver level without requiring hardware modifications.
+cmpunlocker lifts those clamps during driver initialisation, before GSP boots. Nothing is flashed and no hardware is modified; the unlock is re-applied from scratch on every driver load.
 
----
-
-## The Problem
-
-The CMP 170HX ships with:
-
-- **Disabled SMs (Streaming Multiprocessors)**: SS0 and SS1 (Suspension State registers) artificially disable clusters of SMs
-- **Restricted memory geometry**: The HBM2e controller is configured for 8GB or 10GB instead of the full 64GB or 40GB the die supports
-- **Firmware locks**: OTP (One-Time Programmable) fuses prevent reconfiguration at runtime
-
-All three are enforced during GSP (GPU System Processor) boot, which happens when the driver loads.
+| | Stock | Unlocked |
+|---|---|---|
+| Memory (`0x20C2`) | 8 GB | 64 GB |
+| Memory (`0x2082`) | 10 GB | 40 GB |
+| SM speed select | clamped | full |
+| PCIe | Gen1 | Gen2 |
+| GPU-to-GPU P2P | blocked | working |
 
 ---
 
-## The Unlock Approach
+## The SEC2 Booter Trick
 
-Instead of modifying OTP (which is physically locked), cmpunlocker intercepts the driver's boot flow and reconfigures the GPU before OTP locks take effect:
+The host cannot write a PLM-gated register, but the SEC2 Booter can — it runs signed and is trusted by the PLM logic.
 
-1. **Open the SEC2 Booter PMM** — disable security restrictions on the Booter so it can execute custom PLM sequences
-2. **Configure memory geometry** — write CFG1 (config) and LMR (LM Request) registers to unlock full HBM2e capacity
-3. **Enable all SMs** — write SS0 and SS1 (Suspension State) to re-enable disabled SM clusters
-4. **Finalize** — perform late PMA (Power Management Array) adjustments and allow normal boot to continue
+During GSP bootstrap the driver allocates a *signature* buffer and hands its physical address to the Booter. cmpunlocker enlarges that buffer to `0xf800` bytes and fills it with a crafted Booter payload instead of the real signature. The payload makes SEC2 perform exactly one 32-bit register write, with the address and value taken from two slots inside it (`0xf76c` and `0xf754`).
+
+One Booter Load = one gated write. Rewriting those two slots and running Booter Load again gives the next write, so the gates are opened one at a time in a loop. When the loop is done the real signature is put back and GSP boots on an already-unlocked GPU, seeing nothing unusual.
+
+The payload is loaded from `/lib/firmware/nvidia/ga100/gsp/dmem.bin` when present, otherwise it is generated in place — both produce the same image.
 
 ---
 
 ## Code Layout
 
-The unlock is a single source file that is dropped into the stock driver tree, plus a handful of one-line hooks that call into it:
+All logic lives in one source file that is dropped into the stock tree. The patches only add the calls that reach it, which is why they are a few lines each.
 
 ```
 driver/
@@ -53,116 +50,113 @@ driver/
 
 `build.sh` copies `driver/src/*` into `src/nvidia/{src,inc}/kernel/gpu/cmpunlock/`, appends one `SRCS +=` line to `src/nvidia/srcs.mk`, then applies the patches.
 
-Keeping the logic out of the patches means editing the unlock is ordinary C editing, and moving to a new nvidia-open release only requires re-checking the hook insertion points rather than re-merging large diffs. Every hook is a no-op on non-CMP GPUs, so the patched modules stay safe on mixed systems.
+Every hook starts with `cmpUnlockIsTarget()`, which matches PCI device ID `0x20C2` or `0x2082`. On any other GPU each hook is a no-op, so the patched modules are safe on mixed systems. Keeping the logic outside the patches means moving to a new nvidia-open release only requires re-checking the insertion points instead of re-merging large diffs.
 
 ---
 
-## Technical Components
+## Boot Sequence
 
-### SEC2 Booter & PLM
+| Where | Hook | What it does |
+|---|---|---|
+| `_kgspCreateSignatureMemdesc()` | `cmpUnlockSignatureSize`<br>`cmpUnlockFillSignature` | Enlarge the signature buffer, stash the real signature aside, write the Booter payload in its place |
+| `_kgspBootGspRm()`, after `kgspPrepareForBootstrap_HAL()` | `cmpUnlockPreBoot` | The unlock itself (below) |
+| `kgspBootstrap_TU102()`, after Booter Load | `cmpUnlockPostBooterLoad` | Verify the gated registers survived; first half of the HBM overclock |
+| `kgspInitRm_IMPL()`, after static config fetch | `cmpUnlockFixStaticInfo` | Widen the FB geometry GSP reported back to the unlocked size |
+| `kgspInitRm_IMPL()`, after `kgspStartLogPolling()` | `cmpUnlockMclkPostGsp` | Second half of the HBM overclock |
+| `_gpuInitPcieP2PCapability()` | `cmpUnlockForceP2PCaps` | Override the GSP P2P capability response |
+| `RmInitNvDevice()` | `cmpUnlockLateExtendPma` | Hand the memory above the stock limit to PMA |
 
-The SEC2 Booter executes firmware sequences (PLMs: "Program Logic Modules") during GPU power-on and reset. Normally, PLMs are locked to a restricted set via security fuses.
+`cmpUnlockPreBoot()` runs in the window after the bootstrap is prepared and before GSP is released:
 
-cmpunlocker:
-- Patches the driver to open the PMM (Permute Mask Model) during boot
-- Sets PLM permissions to `0xffffffff` (all PLMs enabled)
-- Injects custom PLM sequences that reconfigure GPU state
+1. Save the WPR2 window (`0x1fa824` / `0x1fa828`) — Booter Load clobbers it and it is restored before every round trip.
+2. Walk the PLM table: 17 entries, each one Booter Load that opens a gate, retried once if the register does not read back as expected.
+3. With the gates open, write the SM speed select and memory geometry registers.
+4. Retrain the PCIe link at Gen2.
+5. Restore the stock signature, then call `kgspPopulateWprMeta_HAL()` — the framebuffer size changed underneath, so the WPR layout has to be recomputed.
 
-Expected dmesg output:
+Patch `0001` also stops the stock "WPR2 already up, cannot proceed" bail-out from firing on a CMP, because cmpunlocker recovers from that state instead of treating it as fatal.
+
+---
+
+## Register Map
+
+Written once the gates are open:
+
+| Register | Address | Value |
+|---|---|---|
+| SM speed select 0 | `0x0082381c` | `0x88888888` |
+| SM speed select 1 | `0x00823820` | `0x00000008` |
+| FBPA CFG1 | `0x009a0204` | `0x02779000` (8GB) / `0x02669000` (10GB) |
+| MMU LMR | `0x00100ce0` | `0x0000020B` (8GB) / `0x0000028A` (10GB) |
+
+CFG1 sets the memory address mapping and bank layout; LMR selects the capacity. 8GB vs 10GB is decided at runtime from the device ID, so one build covers both variants and mixed systems.
+
+---
+
+## PCIe Gen2
+
+The XP registers that control link speed are PLM-gated, so they are only writable inside the unlock window. The retrain clears the CYA bits pinning the link to Gen1, selects Gen2 in `XP_CFG0` and `XP_LCTRL2`, sets the *root port's* target speed via its LnkCtl2 config word (the link will not come up at Gen2 unless both ends agree), then triggers a directed speed change and polls the LTSSM until it settles.
+
+---
+
+## GPU-to-GPU P2P
+
+GSP firmware reports `pcieP2PReadCaps` / `pcieP2PWriteCaps` as `NOT_SUPPORTED` for CMP device IDs. The driver stores that verdict and `p2pGetCapsStatus()` then refuses every PCIe P2P path, so `cudaDeviceEnablePeerAccess()` fails and `nvidia-smi topo -m` shows `GNS`.
+
+The restriction is purely in that reported capability — the GA100 mailbox P2P hardware works. `cmpUnlockForceP2PCaps()` overwrites both fields with `OK` right after the RPC returns, and the driver falls into `P2P_CONNECTIVITY_PCIE_PROPRIETARY`: the mailbox protocol, which does not need a large BAR1 (the CMP's is 64 MiB and locked by VBIOS).
+
+Throughput follows the PCIe topology — roughly 1.7 GB/s between GPUs behind one switch at Gen2 x4, less across a host bridge or NUMA node.
+
+---
+
+## HBM Memory Clock
+
+Compiled out entirely unless `--mclk-ndiv=N` is passed; `build.sh` then generates `cmpunlock_config.h` with `CMPUNLOCK_MCLK_NDIV`. The clock is `N * 27` MHz.
+
+The sequence is VBIOS-agnostic: the stock NDIV is read out of the PLL rather than assumed, and every COEFF write is a read-modify-write that preserves the MDIV/PDIV the VBIOS programmed. It runs in two halves:
+
+- **After Booter Load** — assert MEMCLK_CHANGE_ALERT, enter HBM self-refresh, cycle the PLL on each of the 12 FBPAs (drop the enable bits, write the new NDIV, re-enable, poll for lock), exit self-refresh, run a DDLL calibration, clear the alert.
+- **After GSP is up** — one multicast COEFF write across all FBPAs, followed by a PRI fence and a lock poll.
+
+---
+
+## Supporting Changes
+
+Not part of the unlock proper, but required for the unlocked geometry to be stable:
+
+- **Memory manager quirks** (`0004`) — CE virtual mode is disabled for the scrubber and CeUtils, and the PTE kind is forced to `GENERIC_MEMORY` instead of the PLC-disable variant. Compression is unreliable on the widened geometry.
+- **BAR0 PRAMIN clamp** (`0005`) — the BAR0 window only decodes the stock 8 GB, so PRAMIN is pinned where it would have landed before the unlock widened `fbAddrSpaceSizeMb`.
+- **Persistent software state** (`0006`) — `NV_FLAG_PERSISTENT_SW_STATE` is set for CMP device IDs. The unlock happens once during GSP bootstrap, so the software state has to survive teardown rather than being rebuilt.
+- **Late PMA extension** (`0003`) — GSP hands back a heap sized for the stock capacity. The memory above it is present but parked in a reserved FB region; once the heap and PMA are fully initialised, that region is carved out and registered with PMA.
+
+---
+
+## Persistence
+
+The unlock is applied by patched kernel modules, not a userspace daemon. `build.sh` installs `nvidia.ko`, `nvidia-modeset.ko`, `nvidia-uvm.ko`, `nvidia-drm.ko` and `nvidia-peermem.ko` into `/lib/modules/$(uname -r)/updates/cmpunlocker/`, which `depmod` prefers over the stock paths, then rebuilds the initramfs.
+
+Every driver initialisation re-runs the sequence, so the unlock survives reboots until `./remove.sh` is run. Nothing is stored on the card.
+
+---
+
+## Verifying
+
 ```
 CMPUNLOCK: PLM[0] WPR_CFG(0x1fa7cc) attempt=0 status=0x0 reg=0xfffff0ff
 CMPUNLOCK: PLMs: FEAT=0xffffffff FBPA=0xffffffff WPR=0xffffffff WPR_CFG=0xfffff0ff
-```
-
-Booter status codes like `0x31` or `0xffff` during early PLM passes are often harmless if the final boot succeeds.
-
----
-
-### Memory Geometry (CFG1 & LMR)
-
-The GPU memory controller is configured by two registers:
-
-| Card | CFG1 | LMR | Unlocked Capacity |
-|---|---|---|---|
-| 8GB | `0x02779000` | `0x0000020B` | 64GB |
-| 10GB | `0x02669000` | `0x0000028A` | 40GB |
-
-- **CFG1**: Memory configuration register (address mapping, bank layout)
-- **LMR**: LM (Local Memory) Request register (capacity/geometry selector)
-
-cmpunlocker writes both during the unlock sequence. 8GB vs 10GB is decided at runtime from the PCI device ID (`0x20C2` / `0x2082`), so one build works on either card and on mixed systems.
-
----
-
-### Compute State (SS0 & SS1)
-
-SS0 and SS1 are Suspension State registers that control which SM clusters are active:
-
-- Stock firmware sets these to disable ~50% of the SMs
-- cmpunlocker writes `0xffffffff` to both, enabling all clusters
-- The GPU can then use full compute throughput
-
-Expected dmesg output:
-```
 CMPUNLOCK: POST-WRITE SS0=0x88888888 SS1=0x00000008 CFG1=0x02779000 LMR=0x0000020b (devId=0x20c2)
-```
-
----
-
-### FB & PMA Adjustments
-
-After core reconfiguration, the frame buffer (FB) and power management array (PMA) are adjusted to support the new memory geometry and active SMs:
-
-- FB is resized to reflect the new memory capacity
-- PMA is reconfigured for the enabled SM clusters
-- These changes are performed in "late PMA" phase, near the end of boot
-
----
-
-## Boot Flow
-
-1. **Driver loads** → nvidia-open kernel modules initialize
-2. **GSP power-on** → SEC2 Booter executes (normally-locked path)
-3. **cmpunlocker intercepts** → PMM is opened, custom PLM sequences run
-   - PLMs set to unrestricted mode
-   - CFG1/LMR written (memory geometry)
-   - SS0/SS1 written (compute state)
-   - Late PMA adjustments applied
-4. **GSP boot completes** → GPU is now fully unlocked
-5. **Driver ready** → `nvidia-smi` shows 65536 MiB (8GB) or 40960 MiB (10GB)
-
----
-
-## Persistence Across Reboot
-
-The unlock is applied by **patched kernel modules**, not a userspace daemon:
-
-- Modified `nvidia-drm.ko` and `nvidia.ko` are installed to `/lib/modules/$(uname -r)/updates/cmpunlocker/`
-- These modules load before the stock NVIDIA modules (due to the `updates/` directory priority)
-- Every time the driver initializes (on boot or after a reload), the patched sequence runs
-- The unlock persists indefinitely until `./remove.sh` is run
-
-Card profile (8GB vs 10GB) is determined at runtime from PCI device ID.
-
----
-
-### GPU-to-GPU P2P
-
-GSP firmware reports `pcieP2PReadCaps` / `pcieP2PWriteCaps` = NOT_SUPPORTED for CMP device IDs. This blocks `cudaDeviceEnablePeerAccess()` even though the GA100 PCIe mailbox P2P hardware works.
-
-`cmpUnlockForceP2PCaps()` overrides the GSP response to OK after the RPC returns in `_gpuInitPcieP2PCapability()`. The driver then uses `P2P_CONNECTIVITY_PCIE_PROPRIETARY` (mailbox protocol through BAR0/PRAMIN) which does not require large BAR1.
-
-Expected dmesg output:
-```
+CMPUNLOCK: PCIe retrain done (polls=1): LinkCtrlStat=0x... speed=2 width=x16
 CMPUNLOCK: PCIe P2P caps forced to OK
 ```
 
+Non-zero Booter status codes during the early PLM rounds are common and harmless as long as the register reads back correctly and the boot completes — the table retries each gate anyway.
+
 ---
 
-## Known Limitations
+## Limitations
 
-- **Secure Boot must be disabled** — patched modules are unsigned
-- **Requires nvidia-open 610.43.0x** — stock NVIDIA proprietary driver has different boot paths and cannot be patched the same way
-- **Linux only** — GSP boot path is Linux-specific (Windows WDDM driver is fundamentally different)
-- **Kernel headers required** — modules must be compiled for the running kernel version
-
+- **Secure Boot must be disabled** — the patched modules are unsigned.
+- **nvidia-open 610.43.0x only** — the proprietary driver has a different GSP boot path and cannot be patched this way.
+- **Linux only** — the unlock lives in the Linux GSP bootstrap path.
+- **Kernel headers required** — modules are compiled against the running kernel.
+- ?**BAR1 stays at 64 MiB** — locked by VBIOS, so P2P goes through the mailbox protocol rather than direct BAR1 mapping.?

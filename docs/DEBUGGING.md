@@ -29,9 +29,9 @@ If memory is still stock after a cold reboot, open a Discord ticket (see below).
 ## Running the benchmark
 
 ```bash
-./benchmark/nvidia_bench          # default: GPU 0, auto-sized iterations
-./benchmark/nvidia_bench 1        # test GPU 1
-./benchmark/nvidia_bench 0 50     # GPU 0, 50 iterations per test
+./benchmark/nvidia_bench          # default: GPU #0, auto-sized iterations
+./benchmark/nvidia_bench 1        # test GPU #1
+./benchmark/nvidia_bench 0 50     # GPU #0, 50 iterations per test
 ./benchmark/nvidia_bench --csv    # machine-readable output
 ```
 
