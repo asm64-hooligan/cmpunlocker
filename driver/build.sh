@@ -113,32 +113,7 @@ for p in "${patches[@]}"; do
 done
 ok "All patches applied"
 
-#
-# The geometry is selected at runtime from the PCI device ID (see
-# cmpUnlockPreBoot / cmpUnlockFixStaticInfo), so the profile is only a label
-# recorded for the install summary.
-#
-PROFILE="${CMPUNLOCKER_CARD_PROFILE:-8gb}"
-case "${PROFILE}" in
-    8gb|8GB)     PROFILE="8gb";   UNLOCK_LABEL="64GB"  ;;
-    10gb|10GB)   PROFILE="10gb";  UNLOCK_LABEL="40GB"  ;;
-    mixed|MIXED) PROFILE="mixed"; UNLOCK_LABEL="mixed" ;;
-    *)
-        die "Unknown CMPUNLOCKER_CARD_PROFILE='${PROFILE}' (use 8gb, 10gb, or mixed)"
-        ;;
-esac
-ok "Memory profile ${PROFILE}: unlock_geometry=${UNLOCK_LABEL} (chosen per PCI ID at runtime)"
 mkdir -p "${INSTALL_MOD_DIR}"
-printf '%s\n' "${VERSION}" > "${INSTALL_MOD_DIR}/driver_version"
-printf '%s\n' "${PROFILE}" > "${INSTALL_MOD_DIR}/card_profile"
-printf '%s\n' "${UNLOCK_LABEL}" > "${INSTALL_MOD_DIR}/unlock_geometry"
-printf '%s\n' "${MCLK_NDIV:-none}" > "${INSTALL_MOD_DIR}/mclk_ndiv"
-if [[ -n "${CMPUNLOCKER_GPU_INVENTORY:-}" ]]; then
-    printf '%s\n' "${CMPUNLOCKER_GPU_INVENTORY}" > "${INSTALL_MOD_DIR}/gpu_inventory"
-    ok "Wrote gpu_inventory ($(echo "${CMPUNLOCKER_GPU_INVENTORY}" | grep -c . || true) GPU(s))"
-else
-    : > "${INSTALL_MOD_DIR}/gpu_inventory"
-fi
 
 info "Building modules for kernel ${KVER}..."
 cd "${SRC_DIR}"

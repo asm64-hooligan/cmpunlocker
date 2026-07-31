@@ -16,13 +16,6 @@
 sudo ./install.sh
 ```
 
-To force a certain memory profile:
-
-```bash
-sudo ./install.sh --profile=8gb    # 8GB card -> 64GB unlock
-sudo ./install.sh --profile=10gb   # 10GB card -> 40GB unlock
-```
-
 To set the HBM memory clock (multiplier x 27 MHz, any VBIOS, both card variants):
 
 ```bash

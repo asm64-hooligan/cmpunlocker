@@ -8,32 +8,27 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 
-PROFILE_OVERRIDE=""
 CONFIGURE_IOMMU=0
 MCLK_NDIV=""
 for arg in "$@"; do
     case "${arg}" in
-        --profile=8gb|--profile=8GB) PROFILE_OVERRIDE="8gb" ;;
-        --profile=10gb|--profile=10GB) PROFILE_OVERRIDE="10gb" ;;
         --iommu) CONFIGURE_IOMMU=1 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--profile=8gb|10gb] [--iommu] [--mclk-ndiv=N]
+Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N]
 
-  --profile=8gb   Force 8GB metadata label (geometry is still chosen per PCI ID)
-  --profile=10gb  Force 10GB metadata label (geometry is still chosen per PCI ID)
   --iommu         Add iommu=pt to the kernel command line (see README for details)
   --mclk-ndiv=N   HBM memory clock: set PLL multiplier (30-80), N * 27 MHz.
                   Works on any VBIOS, on both 0x20C2 and 0x2082. Stock is 64 on
                   8GB 300W, 54 on 8GB 250W, 45 on 10GB. Without this flag the
-                  overclock patches are not applied at all.
+                  overclock is not applied at all.
 
-Without --profile, each unlockable GPU is classified by PCI device ID:
-  10de:20c2 → 8gb / 64GB unlock
-  10de:2082 → 10gb / 40GB unlock
+Memory geometry is selected automatically from PCI device ID:
+  10de:20c2 → 8GB card → 64GB unlock
+  10de:2082 → 10GB card → 40GB unlock
 
-Multi-GPU and mixed 8GB+10GB systems are supported in one install.
+Multi-GPU and mixed 8GB+10GB systems are supported.
 EOF
             exit 0
             ;;
@@ -115,11 +110,11 @@ echo -e "${CYAN}║               cmpunlocker              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-step "Step 1/6: Verifying root privileges"
+step "Verifying root privileges"
 [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo ./install.sh"
 ok "Running as root"
 
-step "Step 2/6: Detecting CMP 170HX GPU(s)"
+step "Detecting CMP 170HX GPU(s)"
 mapfile -t PCI_LINES < <(lspci -nn 2>/dev/null | grep -iE '10de:20b0|10de:20c2|10de:2082' || true)
 [[ ${#PCI_LINES[@]} -gt 0 ]] || die "No CMP 170HX GPU found (10de:20b0 / 10de:20c2 / 10de:2082)"
 
@@ -128,14 +123,9 @@ if command -v nvidia-smi &>/dev/null; then
     SMI_MEM_CACHE="$(nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits 2>/dev/null || true)"
 fi
 
-GPU_BDFS=()
-GPU_DEVIDS=()
-GPU_PROFILES=()
-GPU_EXPECTED=()
-GPU_CURRENT=()
+GPU_COUNT=0
 COUNT_8GB=0
 COUNT_10GB=0
-COUNT_UNSUPPORTED=0
 
 for PCI_LINE in "${PCI_LINES[@]}"; do
     PCI="$(echo "${PCI_LINE}" | awk '{print $1}')"
@@ -146,17 +136,12 @@ for PCI_LINE in "${PCI_LINES[@]}"; do
     [[ -n "${CUR_MEM}" ]] || CUR_MEM="?"
 
     if [[ "${PROF}" == "unsupported" ]]; then
-        COUNT_UNSUPPORTED=$((COUNT_UNSUPPORTED + 1))
-        warn "GPU ${PCI_FULL} (10de:${DEVID}) — unlock path not gated for this ID; skipping"
+        warn "GPU ${PCI_FULL} (10de:${DEVID}) — not a supported device ID; skipping"
         continue
     fi
 
     EXP="$(expected_mib_for_profile "${PROF}")"
-    GPU_BDFS+=("${PCI_FULL}")
-    GPU_DEVIDS+=("${DEVID}")
-    GPU_PROFILES+=("${PROF}")
-    GPU_EXPECTED+=("${EXP}")
-    GPU_CURRENT+=("${CUR_MEM}")
+    GPU_COUNT=$((GPU_COUNT + 1))
 
     if [[ "${PROF}" == "8gb" ]]; then
         COUNT_8GB=$((COUNT_8GB + 1))
@@ -171,59 +156,8 @@ for PCI_LINE in "${PCI_LINES[@]}"; do
     fi
 done
 
-[[ ${#GPU_BDFS[@]} -gt 0 ]] || die "No unlockable CMP 170HX GPUs found (need 10de:20c2 and/or 10de:2082)"
-if (( COUNT_UNSUPPORTED > 0 )); then
-    info "Inventory: ${#GPU_BDFS[@]} unlockable (${COUNT_8GB}× 8gb, ${COUNT_10GB}× 10gb), ${COUNT_UNSUPPORTED} unsupported"
-else
-    info "Inventory: ${#GPU_BDFS[@]} unlockable (${COUNT_8GB}× 8gb, ${COUNT_10GB}× 10gb)"
-fi
-
-step "Step 3/6: Selecting card memory profile"
-CARD_PROFILE=""
-if (( COUNT_8GB > 0 && COUNT_10GB > 0 )); then
-    CARD_PROFILE="mixed"
-    ok "Mixed variants detected → profile mixed (runtime geometry by PCI ID)"
-    if [[ -n "${PROFILE_OVERRIDE}" ]]; then
-        warn "--profile=${PROFILE_OVERRIDE} ignored for mixed inventory; card_profile stays mixed (each card unlocks by PCI ID)"
-    fi
-elif (( COUNT_8GB > 0 )); then
-    CARD_PROFILE="8gb"
-elif (( COUNT_10GB > 0 )); then
-    CARD_PROFILE="10gb"
-else
-    die "Internal error: no unlockable profiles counted"
-fi
-
-if [[ -n "${PROFILE_OVERRIDE}" && "${CARD_PROFILE}" != "mixed" ]]; then
-    if [[ "${PROFILE_OVERRIDE}" != "${CARD_PROFILE}" ]]; then
-        warn "Inventory is ${CARD_PROFILE} but --profile=${PROFILE_OVERRIDE} was forced (metadata only; geometry follows PCI ID)"
-    else
-        ok "Profile forced via --profile=${CARD_PROFILE}"
-    fi
-    CARD_PROFILE="${PROFILE_OVERRIDE}"
-fi
-
-case "${CARD_PROFILE}" in
-    8gb)
-        info "Unlock geometry: 64GB per card (CFG1=0x02779000 LMR=0x0000020B)"
-        ;;
-    10gb)
-        info "Unlock geometry: 40GB per card (CFG1=0x02669000 LMR=0x0000028A)"
-        ;;
-    mixed)
-        info "Unlock geometry: 64GB for 20c2 / 40GB for 2082"
-        ;;
-    *)
-        die "Internal error: bad profile ${CARD_PROFILE}"
-        ;;
-esac
-
-GPU_INVENTORY_LINES=()
-for i in "${!GPU_BDFS[@]}"; do
-    GPU_INVENTORY_LINES+=("${GPU_BDFS[$i]} ${GPU_DEVIDS[$i]} ${GPU_PROFILES[$i]} ${GPU_EXPECTED[$i]}")
-done
-export CMPUNLOCKER_CARD_PROFILE="${CARD_PROFILE}"
-export CMPUNLOCKER_GPU_INVENTORY="$(printf '%s\n' "${GPU_INVENTORY_LINES[@]}")"
+[[ "${GPU_COUNT}" -gt 0 ]] || die "No unlockable CMP 170HX GPUs found (need 10de:20c2 and/or 10de:2082)"
+info "Found ${GPU_COUNT} unlockable GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
 
 if [[ -n "${MCLK_NDIV}" ]]; then
     if ! [[ "${MCLK_NDIV}" =~ ^[0-9]+$ ]] || [[ "${MCLK_NDIV}" -lt 30 || "${MCLK_NDIV}" -gt 80 ]]; then
@@ -244,7 +178,7 @@ else
 fi
 export CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}"
 
-step "Step 4/6: Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
+step "Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
 [[ ${#SUPPORTED_VERSIONS[@]} -gt 0 ]] || die "No supported versions listed in driver/VERSION"
 if [[ -d /sys/firmware/efi ]] && command -v mokutil &>/dev/null; then
     if mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
@@ -288,16 +222,14 @@ ok "NVIDIA driver ${detected} is supported"
 [[ -d "/lib/modules/$(uname -r)/build" ]] || die "Kernel headers missing for $(uname -r). Install linux-headers-$(uname -r) or kernel-devel."
 ok "Kernel headers present for $(uname -r)"
 
-step "Step 5/6: Building and installing patched modules"
+step "Building and installing patched modules"
 chmod +x "${SCRIPT_DIR}/driver/build.sh"
 CMPUNLOCKER_DRIVER_VERSION="${detected}" \
-CMPUNLOCKER_CARD_PROFILE="${CARD_PROFILE}" \
-CMPUNLOCKER_GPU_INVENTORY="${CMPUNLOCKER_GPU_INVENTORY}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
     "${SCRIPT_DIR}/driver/build.sh"
-ok "Patched modules installed (profile ${CARD_PROFILE})"
+ok "Patched modules installed"
 
-step "Step 5b/6: Configuring IOMMU (passthrough)"
+step "Configuring IOMMU (passthrough)"
 IOMMU_STATUS="skipped"
 IOMMU_PARAMS=""
 
@@ -463,38 +395,23 @@ else
     fi
 fi
 
-step "Step 6/6: Done"
 echo ""
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║               cmpunlocker              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
-echo "cmpunlocker install finished!"
-echo "Profile: ${CARD_PROFILE}  |  ${#GPU_BDFS[@]} GPU(s): ${COUNT_8GB}× 8gb, ${COUNT_10GB}× 10gb"
-if [[ -n "${IOMMU_PARAMS}" && "${IOMMU_STATUS}" != "skipped" ]]; then
-    echo "IOMMU:   ${IOMMU_PARAMS} (${IOMMU_STATUS})"
-else
-    echo "IOMMU:   not configured"
-fi
+echo "Installed for ${GPU_COUNT} GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
 if [[ -n "${MCLK_NDIV}" ]]; then
-    echo "MCLK:    NDIV=${MCLK_NDIV} → $((MCLK_NDIV * 27)) MHz"
-else
-    echo "MCLK:    stock (overclock patches not compiled in)"
+    echo "MCLK: NDIV=${MCLK_NDIV} ($((MCLK_NDIV * 27)) MHz)"
 fi
-echo ""
-echo "Per-GPU expectations after unlock:"
-printf "  %-16s %-8s %-8s %s\n" "BDF" "PCI ID" "Variant" "Expect MiB"
-for i in "${!GPU_BDFS[@]}"; do
-    printf "  %-16s %-8s %-8s ~%s\n" "${GPU_BDFS[$i]}" "${GPU_DEVIDS[$i]}" "${GPU_PROFILES[$i]}" "${GPU_EXPECTED[$i]}"
-done
 echo ""
 echo "Next:"
 echo -e "  1. Cold reboot: ${CYAN}sudo shutdown -h now${NC}  (then power on)"
 echo -e "  2. Benchmark: ${CYAN}./benchmark/nvidia_bench${NC}"
 echo -e "  3. Unlock logs: ${CYAN}sudo dmesg | grep CMPUNLOCK${NC}"
 if [[ -n "${IOMMU_PARAMS}" && "${IOMMU_STATUS}" != "skipped" ]]; then
-    echo -e "  4. Verify IOMMU after reboot: ${CYAN}cat /proc/cmdline${NC}"
+    echo -e "  4. Verify IOMMU: ${CYAN}cat /proc/cmdline${NC}"
 fi
 echo ""
-echo "Log saved to: ${LOG_FILE}"
+echo "Log: ${LOG_FILE}"
 echo ""

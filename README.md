@@ -33,14 +33,7 @@ Below are memory and performance results after applying the unlock:
 sudo ./install.sh
 ```
 
-To force a certain memory profile:
-
-```bash
-sudo ./install.sh --profile=8gb    # 8GB card -> 64GB unlock
-sudo ./install.sh --profile=10gb   # 10GB card -> 40GB unlock
-```
-
-Then perform a cold reboot (full power off, then boot).
+Then perform a cold reboot (full power off, then boot). The correct memory geometry is selected automatically from the PCI device ID (`0x20C2` = 8GB -> 64GB, `0x2082` = 10GB -> 40GB).
 
 ### HBM Memory Clock
 
