@@ -1,15 +1,16 @@
-diff -Naur a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
---- a/kernel-open/nvidia/nv.c	2026-07-18 11:26:26.928006389 -0700
-+++ b/kernel-open/nvidia/nv.c	2026-07-18 11:26:26.930357872 -0700
-@@ -1521,6 +1521,15 @@
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -1521,6 +1521,17 @@
          goto failed_release_irq;
      }
  
-+    if (nv->pci_info.device_id == 0x20C2)
-+    {
-+        nv->flags |= NV_FLAG_PERSISTENT_SW_STATE;
-+    }
-+    else if (nv->pci_info.device_id == 0x2082)
++    /*
++     * CMP 170HX: the unlock is applied once during GSP bootstrap, so the
++     * software state has to survive teardown rather than being rebuilt.
++     * Device IDs match CMPUNLOCK_DEVID_* in cmpunlock.h; they are repeated
++     * here because kernel-open sources cannot include RM headers.
++     */
++    if (nv->pci_info.device_id == 0x20C2 || nv->pci_info.device_id == 0x2082)
 +    {
 +        nv->flags |= NV_FLAG_PERSISTENT_SW_STATE;
 +    }
