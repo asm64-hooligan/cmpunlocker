@@ -2,9 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="cmpunlocker"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-INSTALL_DIR="/opt/cmpunlocker"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -15,15 +12,7 @@ fi
 info() { echo -e "${CYAN}==>${NC} $*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
-err()  { echo -e "${RED}✗${NC} $*" >&2; }
-die()  { err "$*"; exit 1; }
-
-step() {
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}$*${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
+die()  { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
 
 echo ""
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
@@ -33,20 +22,16 @@ echo ""
 
 if [[ "${1:-}" != "--yes" && "${1:-}" != "-y" ]]; then
     warn "This removes cmpunlocker patched kernel modules:"
-    echo "  - Stops cmpunlocker systemd service"
     echo "  - Removes /lib/modules/*/updates/cmpunlocker/"
-    echo "  - Removes ${INSTALL_DIR} (legacy install dir, if present)"
+    echo "  - Rebuilds initramfs"
     echo "  - Reloads stock NVIDIA modules (brief display interruption)"
-    echo "  - Removes cmpretrain service / modprobe Gen2 helpers"
     echo "  - Restores the pre-install kernel command line (reverts IOMMU changes)"
     echo ""
     echo "Run: sudo ./remove.sh --yes"
     exit 1
 fi
 
-step "Step 1/5: Verifying root privileges"
 [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo ./remove.sh --yes"
-ok "Running as root"
 
 LOG_DIR="${SCRIPT_DIR}/logs"
 if ! mkdir -p "${LOG_DIR}" 2>/dev/null || [[ ! -w "${LOG_DIR}" ]]; then
@@ -55,38 +40,7 @@ fi
 LOG_FILE="${LOG_DIR}/remove_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
-step "Step 2/5: Stopping leftover cmpunlocker service"
-if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-    systemctl stop "${SERVICE_NAME}" || true
-    ok "Service stopped"
-else
-    warn "Service not running"
-fi
-if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-    systemctl disable "${SERVICE_NAME}" || true
-    ok "Service disabled"
-fi
-if [[ -f "${SERVICE_FILE}" ]]; then
-    rm -f "${SERVICE_FILE}"
-    systemctl daemon-reload
-    systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
-    ok "Removed ${SERVICE_FILE}"
-fi
-pkill -f "${INSTALL_DIR}/daemon/watchdog.py" 2>/dev/null || true
-
-for legacy_unit in cmpretrain.service cmp-gen2-retrain.service; do
-    systemctl disable --now "${legacy_unit}" 2>/dev/null || true
-    systemctl reset-failed "${legacy_unit}" 2>/dev/null || true
-done
-rm -f /etc/systemd/system/cmpretrain.service /usr/local/sbin/retrain.sh
-rm -f /etc/systemd/system/cmp-gen2-retrain.service /usr/local/sbin/cmp-gen2-retrain.sh
-rm -f /etc/modprobe.d/cmp-pcie-gen2.conf
-systemctl disable --now gen2.service 2>/dev/null || true
-systemctl reset-failed gen2.service 2>/dev/null || true
-rm -f /etc/systemd/system/gen2.service /usr/local/sbin/gen2-hammer
-systemctl daemon-reload 2>/dev/null || true
-ok "Removed PCIe Gen2 helpers"
-
+info "Reverting IOMMU kernel parameters..."
 iommu_restored=0
 for cfg in /etc/default/grub /etc/kernel/cmdline; do
     if [[ -f "${cfg}.cmpunlocker.bak" ]]; then
@@ -105,10 +59,10 @@ if (( iommu_restored )); then
     fi
     ok "Reverted IOMMU kernel parameters (effective after reboot)"
 else
-    warn "No IOMMU config backup found — kernel command line left as-is"
+    info "No IOMMU config backup found — kernel command line left as-is"
 fi
 
-step "Step 3/5: Removing patched modules and legacy files"
+info "Removing patched modules..."
 mod_removed=0
 kernels_touched=()
 shopt -s nullglob
@@ -125,7 +79,7 @@ done
 [[ "${mod_removed}" -gt 0 ]] || warn "No patched kernel modules found"
 
 if [[ ${#kernels_touched[@]} -gt 0 ]]; then
-    info "Rebuilding initramfs so stock modules are packed again..."
+    info "Rebuilding initramfs..."
     for kernel in "${kernels_touched[@]}"; do
         if command -v update-initramfs &>/dev/null; then
             update-initramfs -u -k "${kernel}" 2>/dev/null || true
@@ -136,26 +90,10 @@ if [[ ${#kernels_touched[@]} -gt 0 ]]; then
     if command -v mkinitcpio &>/dev/null && ! command -v update-initramfs &>/dev/null && ! command -v dracut &>/dev/null; then
         mkinitcpio -P 2>/dev/null || true
     fi
-    ok "initramfs rebuild attempted"
+    ok "initramfs rebuilt"
 fi
 
-for gsp in /lib/firmware/nvidia/*/gsp_tu10x.bin; do
-    rm -f \
-        "${gsp}.cmpunlocker.bak" \
-        "${gsp}.cmpunlocker.patched" \
-        "${gsp}.cmpunlocker.tmp" \
-        "${gsp}.cmpunlocker.cleanup" \
-        "${gsp}.cmpunlocker.pat"
-done
-
-if [[ -d "${INSTALL_DIR}" ]]; then
-    rm -rf "${INSTALL_DIR}"
-    ok "Removed ${INSTALL_DIR}"
-else
-    warn "${INSTALL_DIR} not found (ok for module-only installs)"
-fi
-
-step "Step 4/5: Reloading stock NVIDIA driver"
+info "Reloading stock NVIDIA driver..."
 if lsmod | grep -q '^nvidia'; then
     warn "Unloading NVIDIA modules (display may flicker)"
     for svc in gdm3 sddm lightdm display-manager; do
@@ -196,14 +134,9 @@ else
 fi
 
 echo ""
-echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║               cmpunlocker              ║${NC}"
-echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
-echo ""
-
-echo "cmpunlocker has been removed from system."
+ok "cmpunlocker removed"
 echo "Log saved to: ${LOG_FILE}"
 echo ""
-echo "If the GPU or display is not working, reboot once:"
+echo "If the GPU or display is not working, reboot:"
 echo -e "  ${CYAN}sudo reboot${NC}"
 echo ""

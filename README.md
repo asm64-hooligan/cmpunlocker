@@ -1,7 +1,6 @@
 # cmpunlocker
 
-Unlock tool for the NVIDIA CMP 170HX (GA100) mining card. Restores full SM compute throughput and unlocked HBM2e memory geometry that are restricted in firmware/OTP configuration.
-
+Unlock tool for the NVIDIA CMP 170HX (GA100). Restores full SM compute, unlocked HBM2e memory geometry and PCIe Gen2 that are restricted in firmware/OTP configuration.
 
 **[Join our Discord community](https://discord.gg/CdHSakKSFv)** for support and discussions.
 
@@ -22,40 +21,37 @@ Below are memory and performance results after applying the unlock:
 
 ## Requirements
 
-- Linux (x86-64)
+- Linux (x86-64 or aarch64)
 - Root access
-- NVIDIA CMP 170HX
+- NVIDIA CMP 170HX (8GB or 10GB)
 - **nvidia-open 610.43.0x already installed** (libs + firmware)
 - Kernel headers matching the running kernel (`linux-headers-$(uname -r)` / `kernel-devel`)
 - Secure Boot disabled (patched modules are unsigned)
 - Network access on first install (downloads matching stock `open-gpu-kernel-modules` sources)
-- Python 3 (used at build time to select 8GB/10GB geometry)
 
 ---
 
 ## Install
 
-To install cmpunlocker, run the following command:
-
 ```bash
 sudo ./install.sh
 ```
 
-To force a certain memory profile, use the `--profile` option:
+To force a certain memory profile:
 
 ```bash
-sudo ./install.sh --profile=8gb    # 8GB card → 64GB unlock
-sudo ./install.sh --profile=10gb   # 10GB card → 40GB unlock
+sudo ./install.sh --profile=8gb    # 8GB card -> 64GB unlock
+sudo ./install.sh --profile=10gb   # 10GB card -> 40GB unlock
 ```
 
 Then perform a cold reboot (full power off, then boot).
 
 ### HBM Memory Clock
 
-`--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N × 27` MHz. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB) — the driver reads the stock NDIV out of the PLL and rewrites only that field, leaving MDIV/PDIV as the VBIOS programmed them.
+`--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N * 27` MHz. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB).
 
 ```bash
-sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
+sudo ./install.sh --mclk-ndiv=70   # 1890 MHz
 ```
 
 | NDIV | Frequency | Notes                           |
@@ -69,44 +65,64 @@ sudo ./install.sh --mclk-ndiv=70   # → 1890 MHz
 
 Values below stock downclock the card, which is the way to stabilise a card that fails at stock.
 
-Without the flag, patches `0008` and `0009` are not applied at all. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB system the same multiplier lands on every card.
+Without the flag the overclock is compiled out entirely. The multiplier is compiled into the modules, so changing it means re-running `install.sh`. In a mixed 8GB+10GB system the same multiplier lands on every card.
 
 If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
 
 ### IOMMU
 
-NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. In this mode, DMA between the GPU and system memory bypasses IOMMU translation, avoiding extra latency and potential mapping errors.
-
-The installer does **not** touch the kernel command line by default. To have it add `iommu=pt` automatically:
+NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. The installer does **not** touch the kernel command line by default:
 
 ```bash
 sudo ./install.sh --iommu
 ```
 
-Or add `iommu=pt` to your kernel cmdline manually (via GRUB, systemd-boot, etc.). IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
+Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
+
+---
+
+## Verify & Benchmark
+
+After install and cold reboot, run the built-in GPU benchmark:
+
+```bash
+./benchmark/nvidia_bench
+```
+
+This measures memory bandwidth, tensor core throughput, PCIe speed, SM clock, and reports hardware features. An unlocked 8GB card should show ~64 GiB total memory and 56/70 SMs; a 10GB card should show ~40 GiB and 54/70 SMs.
+
+```bash
+./benchmark/nvidia_bench 0           # test GPU 0 (default)
+./benchmark/nvidia_bench --csv       # machine-readable output
+```
+
+A pre-built x86-64 binary is included. On aarch64 (or to rebuild), install the CUDA toolkit and build from source:
+
+```bash
+cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
+  -gencode arch=compute_80,code=sm_80 && strip nvidia_bench
+```
 
 ## What Gets Unlocked
 
 | Feature | Status |
 |---|---|
-| Full SM compute throughput (SS0/SS1) | Working ✓ |
-| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working ✓ |
-| PCIe Gen 2 speeds | Working ✓ |
-| HBM2 memory overclock/downclock | Working ✓ |
-| Persistence across reboot (patched modules) | Working ✓ |
+| Full SM compute throughput (SS0/SS1) | Working |
+| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working |
+| PCIe Gen 2 speeds | Working |
+| HBM2 memory overclock/downclock | Working |
+| Persistence across reboot (patched modules) | Working |
 
 ---
 
 ## Uninstall
 
-To uninstall cmpunlocker, run the following command:
-
 ```bash
-sudo ./uninstall.sh --yes
+sudo ./remove.sh --yes
 ```
 
 Then perform a cold reboot (full power off, then boot).
 
-## Support & Community
+## Community
 
-Having issues? Need help? Join our [Discord community](https://discord.gg/CdHSakKSFv) to discuss with other users and get support.
+Join our [Discord community](https://discord.gg/CdHSakKSFv) to discuss with other users.

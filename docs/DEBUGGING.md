@@ -1,40 +1,39 @@
 # Debugging
 
-Before you go asking in the Discord for help, here is a FAQ you should take a look at:
+---
+
+## Show debug logs
+
+`sudo dmesg | grep CMPUNLOCK`
 
 ---
 
 ## "nvidia-smi: command not found"
 
-- The installer likely didn't run or even failed. Re-run `sudo ./install.sh` and cold reboot.
+Re-run `sudo ./install.sh` and cold reboot.
 
 ---
 
 ## nvidia-smi shows 8192 or 10240 MiB (not 65536 or 40960)
 
-- All the PLMs must show `0xffffffff`. Run `sudo dmesg | grep SEC2_DEBUG`to confirm.
+Check that all PLMs show `0xffffffff`:
 
-- If this still persists, refer to the Discord protocol at the end of the document.
+```bash
+sudo dmesg | grep CMPUNLOCK
+```
 
----
-
-## PCIe still at Gen1 after install
-
-- Confirm IOMMU passthrough mode is enabled. Depending on your operating system, enabling IOMMU passthrough can vary.
-
-- If this still persists, refer to the Discord protocol at the end of the document.
+If memory is still stock after a cold reboot, open a Discord ticket (see below).
 
 ---
 
-## Discord protocol
+## Running the benchmark
 
-If you have tried the above steps and are still having issues, please follow these steps to get help in the [Discord community](https://discord.gg/CdHSakKSFv):
+```bash
+./benchmark/nvidia_bench          # default: GPU 0, auto-sized iterations
+./benchmark/nvidia_bench 1        # test GPU 1
+./benchmark/nvidia_bench 0 50     # GPU 0, 50 iterations per test
+./benchmark/nvidia_bench --csv    # machine-readable output
+```
 
-1. Open a ticket in the #issue-support channel.
-
-2. Provide the following information in your ticket:
-   - Your operating system and version
-   - Your GPU model and driver version
-   - The output of `sudo dmesg | grep SEC2_DEBUG`
-   - Latest install log (if applicable)
+A pre-built x86-64 binary is included. On aarch64, see the README for the build command.
 
