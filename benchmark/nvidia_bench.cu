@@ -57,7 +57,7 @@
 // it weakly so older drivers skip the CUDA Cores line instead of dying with a
 // dynamic-loader "undefined symbol" before any output.
 #if defined(CUDART_VERSION) && CUDART_VERSION >= 11050 && defined(__GNUC__)
-#pragma weak nvmlDeviceGetNumGpuCores
+extern "C" nvmlReturn_t nvmlDeviceGetNumGpuCores(nvmlDevice_t, unsigned int *) __attribute__((weak));
 #define HAVE_NUM_GPU_CORES 1
 #endif
 
