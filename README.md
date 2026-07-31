@@ -1,6 +1,6 @@
 # cmpunlocker
 
-Unlock tool for the NVIDIA CMP 170HX (GA100). Restores full SM compute, unlocked HBM2e memory geometry and PCIe Gen2 that are restricted in firmware/OTP configuration.
+Unlock tool for the NVIDIA CMP 170HX (GA100). Restores full SM compute, unlocked HBM2e memory geometry, PCIe Gen2 and GPU-to-GPU P2P — all clamped in firmware on the stock card.
 
 **[Join our Discord community](https://discord.gg/CdHSakKSFv)** for support and discussions.
 
@@ -20,7 +20,7 @@ Below are memory and performance results after applying the unlock:
 - Linux (x86-64 or aarch64)
 - Root access
 - NVIDIA CMP 170HX (8GB or 10GB)
-- **nvidia-open 610.43.0x already installed** (libs + firmware)
+- **nvidia-open 610.43.03 or 610.43.02 already installed** (libs + firmware)
 - Kernel headers matching the running kernel (`linux-headers-$(uname -r)` / `kernel-devel`)
 - Secure Boot disabled (patched modules are unsigned)
 - Network access on first install (downloads matching stock `open-gpu-kernel-modules` sources)
@@ -75,30 +75,30 @@ Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in
 After install and cold reboot:
 
 ```bash
-# Memory and SMs — 8GB card should show 65536 MiB, 10GB card 40960 MiB
+# Memory — 8GB card should show 65536 MiB, 10GB card 40960 MiB
 nvidia-smi --query-gpu=index,memory.total,pci.bus_id --format=csv
 
 # Unlock logs
 sudo dmesg | grep CMPUNLOCK
 
-# P2P support (multi-GPU) — should show PIX/PHB/SYS/OK, not GNS
-nvidia-smi topo -m
+# P2P read matrix (multi-GPU) — should be OK, not GNS
 nvidia-smi topo -p2p r
 
-# PCIe link speed, performance, memory amount, memory speed, SM count...
-./benchmark/nvidia_bench [--cuda_gpu_id]
-
+# Link topology (multi-GPU) — PIX / PHB / SYS depending on how the GPUs are wired
+nvidia-smi topo -m
 ```
 
 ### Benchmark
 
-```bash
-./benchmark/nvidia_bench             # test GPU 0
-./benchmark/nvidia_bench 0           # explicit GPU index
-./benchmark/nvidia_bench --csv       # machine-readable output
-```
+SM count, memory size and bandwidth, PCIe link speed, tensor core throughput (TF32/BF16/INT8), SM clock, and hardware features (NVENC/NVDEC):
 
-Measures memory bandwidth, tensor core throughput (TF32/BF16/INT8), PCIe H2D/D2H speed, SM clock, and reports hardware features (NVENC/NVDEC).
+```bash
+./benchmark/nvidia_bench             # GPU 0, auto-sized iterations
+./benchmark/nvidia_bench 1           # explicit GPU index
+./benchmark/nvidia_bench 0 50        # explicit iteration count
+./benchmark/nvidia_bench --csv       # one header line + one data line
+./benchmark/nvidia_bench --help      # all options
+```
 
 A pre-built x86-64 binary is included. On aarch64 (or to rebuild), install the CUDA toolkit and build from source:
 
@@ -114,9 +114,18 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | Full SM compute throughput (SS0/SS1) | Working |
 | Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working |
 | PCIe Gen 2 speeds | Working |
-| GPU-to-GPU P2P (cudaDeviceEnablePeerAccess) | Working |
-| HBM2 memory overclock/downclock | Working |
+| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`) | Working |
+| HBM2e memory overclock/downclock | Working |
 | Persistence across reboot (patched modules) | Working |
+
+---
+
+## Documentation
+
+- [Installation](docs/INSTALLATION.md) — requirements and install steps
+- [Architecture](docs/ARCHITECTURE.md) — how the unlock works
+- [Debugging](docs/DEBUGGING.md) — when something does not come up
+- [Contributing](docs/CONTRIBUTING.md) — making changes
 
 ---
 
