@@ -10,19 +10,31 @@ LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 
 CONFIGURE_IOMMU=0
 MCLK_NDIV=""
+MCLK_TIMINGS=""
 for arg in "$@"; do
     case "${arg}" in
         --iommu) CONFIGURE_IOMMU=1 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
+        --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N]
+Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N]
 
   --iommu         Add iommu=pt to the kernel command line (see README for details)
   --mclk-ndiv=N   HBM memory clock: set PLL multiplier (30-80), N * 27 MHz.
                   Works on any VBIOS, on both 0x20C2 and 0x2082. Stock is 64 on
                   8GB 300W, 54 on 8GB 250W, 45 on 10GB. Without this flag the
                   overclock is not applied at all.
+  --mclk-timings=N
+                  Scale DRAM timings by N percent, -50 to +50. Positive loosens,
+                  negative tightens (--mclk-timings=-10). Applied before the
+                  clock is raised. Timings are cycle counts, so a higher clock
+                  tightens them in real time; loosening gives that margin back
+                  and can make an otherwise unstable --mclk-ndiv hold.
+                  Tightening is the risky direction: too small a value corrupts
+                  data silently or wedges the memory controller.
+                  Scaled: tRC tRFC tRAS tRP tRCD tWR tFAW tRRD.
+                  Never touched: CL, WL, tCCD.
 
 Memory geometry is selected automatically from PCI device ID:
   10de:20c2 → 8GB card → 64GB unlock
@@ -59,6 +71,29 @@ step() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${CYAN}$*${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+#
+# Ask a yes/no question. Reads from the terminal rather than stdin, because
+# stdout is piped through tee and the script may be run from a pipe.
+# Returns non-zero when the answer is no or when there is nobody to ask.
+#
+confirm() {
+    local reply="" prompt
+    prompt="$(echo -e "${YELLOW}?${NC} $* [y/N] ")"
+    #
+    # -r is not enough: /dev/tty exists but fails to open when there is no
+    # controlling terminal, so probe it by actually opening it.
+    #
+    if { : < /dev/tty; } 2>/dev/null; then
+        read -r -p "${prompt}" reply < /dev/tty || return 1
+    elif [[ -t 0 ]]; then
+        read -r -p "${prompt}" reply || return 1
+    else
+        warn "Not running interactively — cannot ask, assuming no"
+        return 1
+    fi
+    [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 normalize_bus_id() {
@@ -116,7 +151,21 @@ ok "Running as root"
 
 step "Detecting CMP 170HX GPU(s)"
 mapfile -t PCI_LINES < <(lspci -nn 2>/dev/null | grep -iE '10de:20b0|10de:20c2|10de:2082' || true)
-[[ ${#PCI_LINES[@]} -gt 0 ]] || die "No CMP 170HX GPU found (10de:20b0 / 10de:20c2 / 10de:2082)"
+ALLOW_NO_GPU=0
+if [[ ${#PCI_LINES[@]} -eq 0 ]]; then
+    warn "No CMP 170HX found on the PCI bus (10de:20b0 / 10de:20c2 / 10de:2082)"
+    echo ""
+    echo "  The card may be out of the machine, or an unstable overclock may have"
+    echo "  left it unable to initialise. Building without it is how you install a"
+    echo "  corrected driver before putting it back."
+    echo ""
+    echo "  The unlock reads its geometry from the device ID at runtime, so the"
+    echo "  modules built here work on either variant once a card is present."
+    echo ""
+    confirm "Continue without a GPU?" || die "Aborted — no GPU detected"
+    ALLOW_NO_GPU=1
+    echo ""
+fi
 
 SMI_MEM_CACHE=""
 if command -v nvidia-smi &>/dev/null; then
@@ -156,15 +205,28 @@ for PCI_LINE in "${PCI_LINES[@]}"; do
     fi
 done
 
-[[ "${GPU_COUNT}" -gt 0 ]] || die "No unlockable CMP 170HX GPUs found (need 10de:20c2 and/or 10de:2082)"
-info "Found ${GPU_COUNT} unlockable GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
+if [[ "${GPU_COUNT}" -eq 0 ]]; then
+    if (( ALLOW_NO_GPU == 0 )); then
+        warn "No unlockable CMP 170HX found (need 10de:20c2 and/or 10de:2082)"
+        echo ""
+        confirm "Continue anyway?" || die "Aborted — no unlockable GPU detected"
+        ALLOW_NO_GPU=1
+        echo ""
+    fi
+    warn "Building with no GPU to check against"
+else
+    info "Found ${GPU_COUNT} unlockable GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
+fi
 
 if [[ -n "${MCLK_NDIV}" ]]; then
     if ! [[ "${MCLK_NDIV}" =~ ^[0-9]+$ ]] || [[ "${MCLK_NDIV}" -lt 30 || "${MCLK_NDIV}" -gt 80 ]]; then
         die "--mclk-ndiv must be between 30 and 80 (got: ${MCLK_NDIV})"
     fi
     ok "MCLK set: NDIV=${MCLK_NDIV} ($((MCLK_NDIV * 27)) MHz) on every unlockable card"
-    if (( COUNT_8GB > 0 && COUNT_10GB > 0 )); then
+    if (( GPU_COUNT == 0 )); then
+        warn "No card present to check this against — NDIV ${MCLK_NDIV} is being"
+        warn "compiled in blind. Stock is 64 on 8gb 300W, 54 on 8gb 250W, 45 on 10gb."
+    elif (( COUNT_8GB > 0 && COUNT_10GB > 0 )); then
         warn "Mixed inventory: the multiplier is compiled in once and applies to both"
         warn "variants, but stock differs (8gb 54/64 vs 10gb 45). NDIV ${MCLK_NDIV} is"
         warn "$((MCLK_NDIV * 27)) MHz on all of them — verify each card in dmesg."
@@ -177,6 +239,26 @@ else
     info "MCLK overclock disabled (use --mclk-ndiv=N to enable)"
 fi
 export CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}"
+
+if [[ -n "${MCLK_TIMINGS}" ]]; then
+    if ! [[ "${MCLK_TIMINGS}" =~ ^[+-]?[0-9]+$ ]] || \
+       [[ "${MCLK_TIMINGS}" -lt -50 || "${MCLK_TIMINGS}" -gt 50 ]]; then
+        die "--mclk-timings must be between -50 and 50 (got: ${MCLK_TIMINGS})"
+    fi
+    if [[ "${MCLK_TIMINGS}" -lt 0 ]]; then
+        ok "DRAM timings tightened by ${MCLK_TIMINGS#-}% (tRC/tRFC/tRAS/tRP/tRCD/tWR/tFAW/tRRD)"
+        warn "Tightening can corrupt data silently or wedge the memory controller."
+        warn "Validate with a long gpu-burn run before trusting it — see overclocking/"
+    elif [[ "${MCLK_TIMINGS}" -eq 0 ]]; then
+        info "--mclk-timings=0 is a no-op; timings left at stock"
+    else
+        ok "DRAM timings loosened by ${MCLK_TIMINGS#+}% (tRC/tRFC/tRAS/tRP/tRCD/tWR/tFAW/tRRD)"
+    fi
+    info "CL, WL and tCCD are left at stock on purpose — see overclocking/timings/"
+else
+    info "DRAM timings left at stock (use --mclk-timings=N to scale)"
+fi
+export CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}"
 
 step "Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
 [[ ${#SUPPORTED_VERSIONS[@]} -gt 0 ]] || die "No supported versions listed in driver/VERSION"
@@ -200,7 +282,13 @@ if [[ -r /proc/driver/nvidia/version ]]; then
     detected="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' /proc/driver/nvidia/version | head -1 || true)"
 fi
 if [[ -z "${detected}" ]] && command -v nvidia-smi &>/dev/null; then
-    detected="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    #
+    # nvidia-smi prints its "couldn't communicate with the driver" error on
+    # stdout and not stderr, so match the version shape rather than taking
+    # whatever came back.
+    #
+    detected="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+        | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
 fi
 if [[ -z "${detected}" ]]; then
     for cand in "${SUPPORTED_VERSIONS[@]}"; do
@@ -226,6 +314,7 @@ step "Building and installing patched modules"
 chmod +x "${SCRIPT_DIR}/driver/build.sh"
 CMPUNLOCKER_DRIVER_VERSION="${detected}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
+CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
     "${SCRIPT_DIR}/driver/build.sh"
 ok "Patched modules installed"
 
@@ -400,9 +489,16 @@ echo -e "${CYAN}╔════════════════════�
 echo -e "${CYAN}║               cmpunlocker              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
-echo "Installed for ${GPU_COUNT} GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
+if (( GPU_COUNT > 0 )); then
+    echo "Installed for ${GPU_COUNT} GPU(s): ${COUNT_8GB}x 8gb, ${COUNT_10GB}x 10gb"
+else
+    echo "Installed with no GPU present — put the card back, then cold boot"
+fi
 if [[ -n "${MCLK_NDIV}" ]]; then
     echo "MCLK: NDIV=${MCLK_NDIV} ($((MCLK_NDIV * 27)) MHz)"
+fi
+if [[ -n "${MCLK_TIMINGS}" ]]; then
+    echo "DRAM timings: ${MCLK_TIMINGS}% (verify: sudo dmesg | grep TIMING_SCALE)"
 fi
 echo ""
 echo "Next:"

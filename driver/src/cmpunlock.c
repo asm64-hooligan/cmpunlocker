@@ -61,6 +61,22 @@
 #define CMP_FBPA_PLL_CFG_OFFSET     0x3c90U
 #define CMP_FBPA_PLL_COEFF_OFFSET   0x3c98U
 
+/*
+ * HBM2e DRAM timings (FBPA broadcast aperture). Gated by the FBPA_MEM PLM,
+ * which _cmpOpenPlmGates() opens, so these are only writable after the unlock.
+ *
+ * CONFIG0.USE_TIMING_REGS is 0 on this card, which makes the CONFIG registers
+ * the live set; the TIMINGn_GEN registers are a read-only mirror of what the
+ * memory controller actually generated from them.
+ */
+#define CMP_REG_FBPA_CONFIG0        0x009a0290U
+#define CMP_REG_FBPA_CONFIG1        0x009a0294U
+#define CMP_REG_FBPA_CONFIG2        0x009a0298U
+#define CMP_REG_FBPA_CONFIG3        0x009a029cU
+#define CMP_REG_FBPA_CONFIG4        0x009a02a0U
+#define CMP_REG_FBPA_CONFIG10       0x009a02f4U
+#define CMP_REG_FBPA_TIMING0_GEN    0x009a02b0U
+
 /* Booter payload geometry. */
 #define CMP_SIGNATURE_SIZE          0x0000f800ULL
 #define CMP_PAYLOAD_FILL_DWORD      0x000004a7U
@@ -395,6 +411,10 @@ rebuild_fail_create:
  * Each entry is one SEC2 Booter round trip: point the payload at addr, run
  * Booter Load, confirm the register reads back as value.
  *
+ * Only the bits set in mask are compared. Several of these registers have
+ * reserved or hardwired bits that never read back as written, so a full
+ * equality check would report a gate as failed even when it opened.
+ *
  * The PCIe entries have to sit in this table rather than in a second pass of
  * their own - by the time the first loop finishes, the Booter is no longer in
  * a state where further payloads take effect.
@@ -403,25 +423,27 @@ static const struct
 {
     NvU32       addr;
     NvU32       value;
+    NvU32       mask;
     const char *name;
 } cmpPlmTable[] = {
-    { 0x001fa7ccU, 0xfffff0ffU, "WPR_CFG"      },
-    { 0x009a0148U, 0xffffffffU, "FBPA"         },
-    { 0x001fa7c4U, 0xffffffffU, "WPR"          },
-    { 0x00823804U, 0xffffffffU, "FEAT"         },
-    { 0x00088ff4U, 0xffffffffU, "XVE"          },
-    { 0x00088ab4U, 0xffffffffU, "XVE_B"        },
-    { 0x00088ff8U, 0xffffffffU, "XVE_C"        },
-    { 0x00823b00U, 0xffffffffU, "FEAT2"        },
-    { 0x008200fcU, 0xffffffffU, "OPT_PLM"      },
-    { 0x009a3c7cU, 0xffffffffU, "FBPA_PLL0"    },
-    { 0x009a3c80U, 0xffffffffU, "FBPA_PLL1"    },
-    { 0x009a3c84U, 0xffffffffU, "FBPA_PLL2"    },
-    { 0x00088fe8U, 0xffffffffU, "XVE_PLM"      },
-    { 0x00088fecU, 0xffffffffU, "XVE_CYA_PLM"  },
-    { 0x0008872cU, 0x0000000aU, "XVE_FUSE_OVR" },
-    { 0x0008841cU, 0x4034ad00U, "XVE_CYA_SPD"  },
-    { 0x000880a8U, 0x00000002U, "XVE_TARGET"   },
+    { 0x001fa7ccU, 0xfffff0ffU, 0xffffffffU, "WPR_CFG"      },
+    { 0x009a0148U, 0xffffffffU, 0xffffffffU, "FBPA"         },
+    { 0x009a0168U, 0xffffffffU, 0x000000ffU, "FBPA_MEM"     },
+    { 0x001fa7c4U, 0xffffffffU, 0xffffffffU, "WPR"          },
+    { 0x00823804U, 0xffffffffU, 0xffffffffU, "FEAT"         },
+    { 0x00088ff4U, 0xffffffffU, 0xffffffffU, "XVE"          },
+    { 0x00088ab4U, 0xffffffffU, 0xffffffffU, "XVE_B"        },
+    { 0x00088ff8U, 0xffffffffU, 0xffffffffU, "XVE_C"        },
+    { 0x00823b00U, 0xffffffffU, 0xffffffffU, "FEAT2"        },
+    { 0x008200fcU, 0xffffffffU, 0xffffffffU, "OPT_PLM"      },
+    { 0x009a3c7cU, 0xffffffffU, 0xffffffffU, "FBPA_PLL0"    },
+    { 0x009a3c80U, 0xffffffffU, 0xffffffffU, "FBPA_PLL1"    },
+    { 0x009a3c84U, 0xffffffffU, 0xffffffffU, "FBPA_PLL2"    },
+    { 0x00088fe8U, 0xffffffffU, 0xffffffffU, "XVE_PLM"      },
+    { 0x00088fecU, 0xffffffffU, 0xffffffffU, "XVE_CYA_PLM"  },
+    { 0x0008872cU, 0x0000000aU, 0x0000000fU, "XVE_FUSE_OVR" },
+    { 0x0008841cU, 0x4034ad00U, 0x4000a800U, "XVE_CYA_SPD"  },
+    { 0x000880a8U, 0x00000002U, 0x0000000fU, "XVE_TARGET"   },
 };
 
 static void
@@ -456,7 +478,8 @@ _cmpOpenPlmGates(OBJGPU *pGpu, KernelGsp *pKernelGsp, NvU32 wpr2Lo, NvU32 wpr2Hi
                       idx, cmpPlmTable[idx].name, cmpPlmTable[idx].addr,
                       attempt, status, regVal);
 
-            if (regVal == cmpPlmTable[idx].value)
+            if ((regVal & cmpPlmTable[idx].mask) ==
+                (cmpPlmTable[idx].value & cmpPlmTable[idx].mask))
                 opened = NV_TRUE;
         }
 
@@ -567,9 +590,11 @@ cmpUnlockPreBoot(OBJGPU *pGpu, KernelGsp *pKernelGsp, GSP_FIRMWARE *pGspFw)
     GPU_REG_WR32(pGpu, CMP_REG_WPR2_HI, wpr2Hi);
 
     NV_PRINTF(LEVEL_ERROR,
-              "CMPUNLOCK: PLMs: FEAT=0x%08x FBPA=0x%08x WPR=0x%08x WPR_CFG=0x%08x\n",
+              "CMPUNLOCK: PLMs: FEAT=0x%08x FBPA=0x%08x FBPA_MEM=0x%08x "
+              "WPR=0x%08x WPR_CFG=0x%08x\n",
               GPU_REG_RD32(pGpu, 0x00823804U),
               GPU_REG_RD32(pGpu, 0x009a0148U),
+              GPU_REG_RD32(pGpu, 0x009a0168U),
               GPU_REG_RD32(pGpu, 0x001fa7c4U),
               GPU_REG_RD32(pGpu, 0x001fa7ccU));
 
@@ -673,6 +698,202 @@ cmpUnlockFixStaticInfo(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 }
 
 /* -------------------------------------------------------------------------
+ * DRAM timing scaling
+ *
+ * Compiled out unless the build sets CMPUNLOCK_MCLK_TIMINGS (--mclk-timings=N).
+ * N is a signed percentage: positive loosens, negative tightens.
+ *
+ * The timing registers hold cycle counts, not absolute time, so raising the
+ * memory clock silently tightens every one of them: at 1971 MHz a cycle is
+ * 0.507 ns against the 0.579 ns of the 1728 MHz the VBIOS table was written
+ * for. Scaling the counts back up restores the real-time margin the DRAM
+ * expects, which is what lets a higher NDIV hold.
+ *
+ * Only "wait longer before issuing the next command" timings are touched:
+ *
+ *  - CL and WL are excluded on purpose. They say when to sample data and have
+ *    to match the mode registers trained into the HBM stacks, so raising them
+ *    here would desynchronise the read pointer instead of adding margin.
+ *  - tCCD_S/tCCD_L are excluded too. They are the only timings that bind
+ *    streaming bandwidth (loosening them by 4 cycles costs ~60% of it) and
+ *    they already sit at the hardware floor.
+ *
+ * Several fields have a high-bit extension in CONFIG10; those are carried so
+ * a large percentage cannot silently wrap the field. Tightening is clamped at
+ * 1 cycle, since a zero would be nonsense rather than merely aggressive.
+ *
+ * Tightening is the dangerous direction: too small a value corrupts data
+ * silently or wedges the memory controller, and writing the old value back
+ * does not recover it.
+ * ------------------------------------------------------------------------- */
+
+#ifdef CMPUNLOCK_MCLK_TIMINGS
+
+static const struct
+{
+    NvU32       reg;
+    NvU8        lo;        /* field position within reg               */
+    NvU8        width;     /* field width within reg                  */
+    NvU8        msbLo;     /* extension position in CONFIG10          */
+    NvU8        msbWidth;  /* extension width, 0 when there is none   */
+    const char *name;
+} cmpTimingRelaxTable[] = {
+    { CMP_REG_FBPA_CONFIG0,  0, 8,  0, 0, "tRC"     },
+    { CMP_REG_FBPA_CONFIG0,  8, 9,  0, 2, "tRFC"    },
+    { CMP_REG_FBPA_CONFIG0, 17, 7,  0, 0, "tRAS"    },
+    { CMP_REG_FBPA_CONFIG0, 24, 7,  0, 0, "tRP"     },
+    { CMP_REG_FBPA_CONFIG1, 14, 6,  8, 1, "tRCD_rd" },
+    { CMP_REG_FBPA_CONFIG1, 20, 6, 11, 1, "tRCD_wr" },
+    { CMP_REG_FBPA_CONFIG2, 16, 7,  0, 0, "tWR"     },
+    { CMP_REG_FBPA_CONFIG3,  9, 8,  0, 0, "tFAW"    },
+    { CMP_REG_FBPA_CONFIG4, 15, 6,  0, 0, "tRRD"    },
+};
+
+/*
+ * Stock timings, captured the first time the pass runs on a given GPU.
+ *
+ * Every pass scales from these rather than from whatever is in the register,
+ * so running twice cannot compound (a naive re-scale would give 1.2 * 1.2).
+ * Keying on pGpu also means a driver re-init that skipped the power cycle
+ * still scales from the real stock values.
+ */
+static struct
+{
+    OBJGPU *pGpu;
+    NvU32   field[NV_ARRAY_ELEMENTS(cmpTimingRelaxTable)];
+} cmpTimingStock[CMP_MAX_GPUS];
+
+static NvU32 *
+_cmpTimingStockSlot(OBJGPU *pGpu, NvBool *pCaptured)
+{
+    NvU32 i, free = CMP_MAX_GPUS;
+
+    for (i = 0; i < CMP_MAX_GPUS; i++)
+    {
+        if (cmpTimingStock[i].pGpu == pGpu)
+        {
+            *pCaptured = NV_TRUE;
+            return cmpTimingStock[i].field;
+        }
+        if (free == CMP_MAX_GPUS && cmpTimingStock[i].pGpu == NULL)
+            free = i;
+    }
+
+    if (free == CMP_MAX_GPUS)
+        return NULL;
+
+    cmpTimingStock[free].pGpu = pGpu;
+    *pCaptured = NV_FALSE;
+    return cmpTimingStock[free].field;
+}
+
+static NvU32
+_cmpFieldMax(NvU8 width)
+{
+    return (width >= 32) ? 0xFFFFFFFFU : ((1U << width) - 1U);
+}
+
+static void
+_cmpScaleTimings(OBJGPU *pGpu, const char *phase)
+{
+    const NvS32 pct = CMPUNLOCK_MCLK_TIMINGS;
+    NvU32 cfg10, cfg10New;
+    NvU32 *pStock;
+    NvBool captured = NV_FALSE;
+    NvU32 i;
+
+    cfg10 = GPU_REG_RD32(pGpu, CMP_REG_FBPA_CONFIG10);
+    if (CMP_IS_PRI_ERROR(cfg10))
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "TIMING_SCALE: %s aborted, CONFIG10 reads 0x%08x\n", phase, cfg10);
+        return;
+    }
+    cfg10New = cfg10;
+
+    pStock = _cmpTimingStockSlot(pGpu, &captured);
+    if (pStock == NULL)
+    {
+        NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE: %s aborted, stock table full\n", phase);
+        return;
+    }
+
+    NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE: %s, %+d%% (CONFIG0=0x%08x CONFIG10=0x%08x)\n",
+              phase, pct, GPU_REG_RD32(pGpu, CMP_REG_FBPA_CONFIG0), cfg10);
+
+    for (i = 0; i < NV_ARRAY_ELEMENTS(cmpTimingRelaxTable); i++)
+    {
+        NvU32 regVal   = GPU_REG_RD32(pGpu, cmpTimingRelaxTable[i].reg);
+        NvU8  width    = cmpTimingRelaxTable[i].width;
+        NvU8  lo       = cmpTimingRelaxTable[i].lo;
+        NvU8  msbWidth = cmpTimingRelaxTable[i].msbWidth;
+        NvU8  msbLo    = cmpTimingRelaxTable[i].msbLo;
+        NvU32 fieldMax = _cmpFieldMax(width);
+        NvU32 total, totalMax, old, neu;
+
+        if (CMP_IS_PRI_ERROR(regVal))
+        {
+            NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE:   %s skipped, reg 0x%08x reads 0x%08x\n",
+                      cmpTimingRelaxTable[i].name, cmpTimingRelaxTable[i].reg, regVal);
+            continue;
+        }
+
+        old = (regVal >> lo) & fieldMax;
+        if (msbWidth != 0)
+            old |= ((cfg10 >> msbLo) & _cmpFieldMax(msbWidth)) << width;
+
+        /* First pass on this GPU sees the untouched VBIOS table. */
+        if (!captured)
+            pStock[i] = old;
+
+        totalMax = _cmpFieldMax((NvU8)(width + msbWidth));
+
+        /*
+         * Signed scale; every value here is far below the overflow point.
+         * Clamped to [1, field max] - a zero-cycle timing is not a valid
+         * "very tight", it is a broken register.
+         */
+        {
+            NvS32 target = (NvS32)pStock[i] + (((NvS32)pStock[i] * pct) / 100);
+
+            if (target < 1)
+                target = 1;
+            neu = ((NvU32)target > totalMax) ? totalMax : (NvU32)target;
+        }
+        if (neu == old)
+            continue;
+
+        regVal = (regVal & ~(fieldMax << lo)) | ((neu & fieldMax) << lo);
+        GPU_REG_WR32(pGpu, cmpTimingRelaxTable[i].reg, regVal);
+
+        if (msbWidth != 0)
+        {
+            NvU32 msbMask = _cmpFieldMax(msbWidth);
+            cfg10New = (cfg10New & ~(msbMask << msbLo)) |
+                       (((neu >> width) & msbMask) << msbLo);
+        }
+
+        total = (GPU_REG_RD32(pGpu, cmpTimingRelaxTable[i].reg) >> lo) & fieldMax;
+        NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE:   %-7s %4u -> %-4u %s\n",
+                  cmpTimingRelaxTable[i].name, old, neu,
+                  (total == (neu & fieldMax)) ? "" : "<< READBACK MISMATCH");
+    }
+
+    if (cfg10New != cfg10)
+    {
+        GPU_REG_WR32(pGpu, CMP_REG_FBPA_CONFIG10, cfg10New);
+        NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE:   CONFIG10 0x%08x -> 0x%08x\n",
+                  cfg10, GPU_REG_RD32(pGpu, CMP_REG_FBPA_CONFIG10));
+    }
+
+    /* TIMING0_GEN is the controller's own view - proof the writes took. */
+    NV_PRINTF(LEVEL_ERROR, "TIMING_SCALE: %s done, TIMING0_GEN=0x%08x\n",
+              phase, GPU_REG_RD32(pGpu, CMP_REG_FBPA_TIMING0_GEN));
+}
+
+#endif /* CMPUNLOCK_MCLK_TIMINGS */
+
+/* -------------------------------------------------------------------------
  * HBM PLL overclock
  *
  * Both halves are compiled out unless the build sets CMPUNLOCK_MCLK_NDIV
@@ -701,6 +922,12 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               GPU_REG_RD32(pGpu, CMP_REG_SM_SPEED_1),
               GPU_REG_RD32(pGpu, CMP_REG_FBPA_CFG1),
               GPU_REG_RD32(pGpu, CMP_REG_MMU_LMR));
+
+#ifdef CMPUNLOCK_MCLK_TIMINGS
+    /* Must precede the PLL cycle below: the clock has to come up on the
+       loosened timings, not land on the stock ones and then be widened. */
+    _cmpScaleTimings(pGpu, "pre-PLL");
+#endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
     {
@@ -811,13 +1038,27 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 void
 cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 {
+#if defined(CMPUNLOCK_MCLK_TIMINGS) || defined(CMPUNLOCK_MCLK_NDIV)
+    if (!cmpUnlockIsTarget(pGpu))
+        return;
+#endif
+
+#ifdef CMPUNLOCK_MCLK_TIMINGS
+    /*
+     * Second pass, as insurance against GSP reprogramming the timing table
+     * during its own memory init. Measured on 610.43.03 / VBIOS 92.00.6D.00.0A
+     * it does not - the pre-PLL values survive - so this normally finds every
+     * field already at target and writes nothing. It scales from the captured
+     * stock values, so it cannot compound the relax if it does run.
+     */
+    _cmpScaleTimings(pGpu, "post-GSP");
+#endif
+
 #ifdef CMPUNLOCK_MCLK_NDIV
+    {
     const NvU32 newNdiv = CMPUNLOCK_MCLK_NDIV;
     NvU32 coeffPre, plmPre, newCoeff, cfg = 0;
     NvU32 i;
-
-    if (!cmpUnlockIsTarget(pGpu))
-        return;
 
     coeffPre = GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF);
     plmPre   = GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_PLM);
@@ -851,10 +1092,11 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF),
               (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
               cfg, (cfg >> 5) & 1U, i);
-#else
+    }
+#endif
+
     (void)pGpu;
     (void)pKernelGsp;
-#endif
 }
 
 /* -------------------------------------------------------------------------
