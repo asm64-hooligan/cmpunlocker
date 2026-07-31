@@ -22,11 +22,8 @@ Check that all PLMs show `0xffffffff`:
 sudo dmesg | grep CMPUNLOCK
 ```
 
-If memory is still stock after a cold reboot, open a Discord ticket (see below).
 
----
-
-## Running the benchmark
+## Running the benchmark for unlock verification
 
 ```bash
 ./benchmark/nvidia_bench          # default: GPU #0, auto-sized iterations
