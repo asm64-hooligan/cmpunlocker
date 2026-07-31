@@ -93,4 +93,13 @@ void cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp);
  */
 NV_STATUS cmpUnlockLateExtendPma(OBJGPU *pGpu);
 
+/*
+ * Force PCIe P2P caps to OK. GSP firmware reports NOT_SUPPORTED for CMP
+ * cards, but the GA100 mailbox P2P hardware works fine. This overrides the
+ * GSP response so cudaDeviceEnablePeerAccess() succeeds.
+ *
+ * Hook: _gpuInitPcieP2PCapability() in gpu.c, after the GSP RPC.
+ */
+void cmpUnlockForceP2PCaps(OBJGPU *pGpu);
+
 #endif /* CMPUNLOCK_H */

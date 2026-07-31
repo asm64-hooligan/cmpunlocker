@@ -70,20 +70,35 @@ Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in
 
 ---
 
-## Verify & Benchmark
+## Verify
 
-After install and cold reboot, run the built-in GPU benchmark:
+After install and cold reboot:
 
 ```bash
-./benchmark/nvidia_bench
+# Memory and SMs — 8GB card should show 65536 MiB, 10GB card 40960 MiB
+nvidia-smi --query-gpu=index,memory.total,pci.bus_id --format=csv
+
+# Unlock logs
+sudo dmesg | grep CMPUNLOCK
+
+# P2P support (multi-GPU) — should show PIX/PHB/SYS/OK, not GNS
+nvidia-smi topo -m
+nvidia-smi topo -p2p r
+
+# PCIe link speed, performance, memory amount, memory speed, SM count...
+./benchmark/nvidia_bench [--cuda_gpu_id]
+
 ```
 
-This measures memory bandwidth, tensor core throughput, PCIe speed, SM clock, and reports hardware features. An unlocked 8GB card should show ~64 GiB total memory and 56/70 SMs; a 10GB card should show ~40 GiB and 54/70 SMs.
+### Benchmark
 
 ```bash
-./benchmark/nvidia_bench 0           # test GPU 0 (default)
+./benchmark/nvidia_bench             # test GPU 0
+./benchmark/nvidia_bench 0           # explicit GPU index
 ./benchmark/nvidia_bench --csv       # machine-readable output
 ```
+
+Measures memory bandwidth, tensor core throughput (TF32/BF16/INT8), PCIe H2D/D2H speed, SM clock, and reports hardware features (NVENC/NVDEC).
 
 A pre-built x86-64 binary is included. On aarch64 (or to rebuild), install the CUDA toolkit and build from source:
 
@@ -99,6 +114,7 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | Full SM compute throughput (SS0/SS1) | Working |
 | Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working |
 | PCIe Gen 2 speeds | Working |
+| GPU-to-GPU P2P (cudaDeviceEnablePeerAccess) | Working |
 | HBM2 memory overclock/downclock | Working |
 | Persistence across reboot (patched modules) | Working |
 

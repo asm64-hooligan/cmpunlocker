@@ -159,6 +159,18 @@ cmpUnlockIsTarget(OBJGPU *pGpu)
     return (devId == CMPUNLOCK_DEVID_8GB || devId == CMPUNLOCK_DEVID_10GB);
 }
 
+void
+cmpUnlockForceP2PCaps(OBJGPU *pGpu)
+{
+    if (!cmpUnlockIsTarget(pGpu))
+        return;
+
+    pGpu->pcieP2PReadCaps  = 0;
+    pGpu->pcieP2PWriteCaps = 0;
+
+    NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: PCIe P2P caps forced to OK\n");
+}
+
 static NvU64
 _cmpUnlockedFbBytes(OBJGPU *pGpu)
 {

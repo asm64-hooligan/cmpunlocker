@@ -48,6 +48,7 @@ driver/
     0004-memmgr-quirks.patch        mem_mgr*, mem_scrub 3 conditionals
     0005-bar0-pramin-clamp.patch    kern_bus_gm107.c    1 conditional
     0006-persistent-sw-state.patch  nv.c                1 conditional
+    0007-p2p-caps-hook.patch        gpu.c               1 hook
 ```
 
 `build.sh` copies `driver/src/*` into `src/nvidia/{src,inc}/kernel/gpu/cmpunlock/`, appends one `SRCS +=` line to `src/nvidia/srcs.mk`, then applies the patches.
@@ -141,7 +142,20 @@ The unlock is applied by **patched kernel modules**, not a userspace daemon:
 - Every time the driver initializes (on boot or after a reload), the patched sequence runs
 - The unlock persists indefinitely until `./remove.sh` is run
 
-Card profile (8GB vs 10GB) is stored in `/lib/modules/$(uname -r)/updates/cmpunlocker/card_profile` at install time and used during every boot.
+Card profile (8GB vs 10GB) is determined at runtime from PCI device ID.
+
+---
+
+### GPU-to-GPU P2P
+
+GSP firmware reports `pcieP2PReadCaps` / `pcieP2PWriteCaps` = NOT_SUPPORTED for CMP device IDs. This blocks `cudaDeviceEnablePeerAccess()` even though the GA100 PCIe mailbox P2P hardware works.
+
+`cmpUnlockForceP2PCaps()` overrides the GSP response to OK after the RPC returns in `_gpuInitPcieP2PCapability()`. The driver then uses `P2P_CONNECTIVITY_PCIE_PROPRIETARY` (mailbox protocol through BAR0/PRAMIN) which does not require large BAR1.
+
+Expected dmesg output:
+```
+CMPUNLOCK: PCIe P2P caps forced to OK
+```
 
 ---
 
