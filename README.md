@@ -81,7 +81,7 @@ nvidia-smi --query-gpu=index,memory.total,pci.bus_id --format=csv
 # Unlock logs
 sudo dmesg | grep CMPUNLOCK
 
-# P2P read matrix (multi-GPU) — should be OK, not GNS
+# P2P read matrix (multi-GPU, only with --p2p) — should be OK, not GNS
 nvidia-smi topo -p2p r
 
 # Link topology (multi-GPU) — PIX / PHB / SYS depending on how the GPUs are wired
@@ -109,14 +109,14 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 
 ## What Gets Unlocked
 
-| Feature | Status |
-|---|---|
-| Full SM compute throughput (SS0/SS1) | Working |
-| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working |
-| PCIe Gen 2 speeds | Working |
-| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`) | Working |
-| HBM2e memory overclock/downclock | Working |
-| Persistence across reboot (patched modules) | Working |
+| Feature                                                 | Status          |
+|---------------------------------------------------------|-----------------|
+| Full SM compute throughput (SS0/SS1)                    | Working         |
+| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working         |
+| PCIe Gen 2 speeds                                       | Working         |
+| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)           | Opt-in, `--p2p` |
+| HBM2e memory overclock/downclock                        | Working         |
+| Persistence across reboot (patched modules)             | Working         |
 
 ---
 
