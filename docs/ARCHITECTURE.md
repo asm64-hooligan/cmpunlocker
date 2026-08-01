@@ -12,7 +12,7 @@ cmpunlocker lifts those clamps during driver initialisation, before GSP boots. N
 | Memory (`0x2082`) | 10 GB | 40 GB |
 | SM speed select | clamped | full |
 | PCIe | Gen1 | Gen2 |
-| GPU-to-GPU P2P | blocked | working |
+| GPU-to-GPU P2P | blocked | working, opt-in (`--p2p`) |
 
 ---
 
@@ -56,15 +56,15 @@ Every hook starts with `cmpUnlockIsTarget()`, which matches PCI device ID `0x20C
 
 ## Boot Sequence
 
-| Where | Hook | What it does |
-|---|---|---|
-| `_kgspCreateSignatureMemdesc()` | `cmpUnlockSignatureSize`<br>`cmpUnlockFillSignature` | Enlarge the signature buffer, stash the real signature aside, write the Booter payload in its place |
-| `_kgspBootGspRm()`, after `kgspPrepareForBootstrap_HAL()` | `cmpUnlockPreBoot` | The unlock itself (below) |
-| `kgspBootstrap_TU102()`, after Booter Load | `cmpUnlockPostBooterLoad` | Verify the gated registers survived; first half of the HBM overclock |
-| `kgspInitRm_IMPL()`, after static config fetch | `cmpUnlockFixStaticInfo` | Widen the FB geometry GSP reported back to the unlocked size |
-| `kgspInitRm_IMPL()`, after `kgspStartLogPolling()` | `cmpUnlockMclkPostGsp` | Second half of the HBM overclock |
-| `_gpuInitPcieP2PCapability()` | `cmpUnlockForceP2PCaps` | Override the GSP P2P capability response |
-| `RmInitNvDevice()` | `cmpUnlockLateExtendPma` | Hand the memory above the stock limit to PMA |
+| Where                                                     | Hook                                                 | What it does                                                                                        |
+|-----------------------------------------------------------|------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
+| `_kgspCreateSignatureMemdesc()`                           | `cmpUnlockSignatureSize`<br>`cmpUnlockFillSignature` | Enlarge the signature buffer, stash the real signature aside, write the Booter payload in its place |
+| `_kgspBootGspRm()`, after `kgspPrepareForBootstrap_HAL()` | `cmpUnlockPreBoot`                                   | The unlock itself (below)                                                                           |
+| `kgspBootstrap_TU102()`, after Booter Load                | `cmpUnlockPostBooterLoad`                            | Verify the gated registers survived; first half of the HBM overclock                                |
+| `kgspInitRm_IMPL()`, after static config fetch            | `cmpUnlockFixStaticInfo`                             | Widen the FB geometry GSP reported back to the unlocked size                                        |
+| `kgspInitRm_IMPL()`, after `kgspStartLogPolling()`        | `cmpUnlockMclkPostGsp`                               | Second half of the HBM overclock                                                                    |
+| `_gpuInitPcieP2PCapability()`                             | `cmpUnlockForceP2PCaps`                              | Override the GSP P2P capability response (only with `--p2p`)                                        |
+| `RmInitNvDevice()`                                        | `cmpUnlockLateExtendPma`                             | Hand the memory above the stock limit to PMA                                                        |
 
 `cmpUnlockPreBoot()` runs in the window after the bootstrap is prepared and before GSP is released:
 
@@ -103,9 +103,11 @@ The XP registers that control link speed are PLM-gated, so they are only writabl
 
 GSP firmware reports `pcieP2PReadCaps` / `pcieP2PWriteCaps` as `NOT_SUPPORTED` for CMP device IDs. The driver stores that verdict and `p2pGetCapsStatus()` then refuses every PCIe P2P path, so `cudaDeviceEnablePeerAccess()` fails and `nvidia-smi topo -m` shows `GNS`.
 
-The restriction is purely in that reported capability — the GA100 mailbox P2P hardware works. `cmpUnlockForceP2PCaps()` overwrites both fields with `OK` right after the RPC returns, and the driver falls into `P2P_CONNECTIVITY_PCIE_PROPRIETARY`: the mailbox protocol, which does not need a large BAR1 (the CMP's is 64 MiB and locked by VBIOS).
+On the GPU side that restriction is only the reported capability — the GA100 mailbox P2P hardware works. `cmpUnlockForceP2PCaps()` overwrites both fields with `OK` right after the RPC returns, and the driver falls into `P2P_CONNECTIVITY_PCIE_PROPRIETARY`: the mailbox protocol, which does not need a large BAR1 (the CMP's is 64 MiB and locked by VBIOS).
 
-Throughput follows the PCIe topology — roughly 1.7 GB/s between GPUs behind one switch at Gen2 x4, less across a host bridge or NUMA node.
+Where the path works, throughput follows the PCIe topology — roughly 1.7 GB/s between GPUs behind one switch at Gen2 x4, less across a host bridge or NUMA node.
+
+**This is opt-in (`--p2p`) and compiled out by default.** The override changes what the driver *advertises*, not whether the host can carry the traffic. When the topology cannot route peer-to-peer — ACS in the way, no IOMMU passthrough, GPUs on separate root complexes — the honest `NOT_SUPPORTED` is what makes CUDA stage through system memory instead. Forcing the caps removes that fallback: `cudaDeviceEnablePeerAccess()` succeeds, `nvidia-smi topo -p2p r` reports `OK`, and the transfers then time out. A wrong answer that looks right is worse than a correct refusal, which is why it is not the default.
 
 ---
 
@@ -146,7 +148,7 @@ CMPUNLOCK: PLM[0] WPR_CFG(0x1fa7cc) attempt=0 status=0x0 reg=0xfffff0ff
 CMPUNLOCK: PLMs: FEAT=0xffffffff FBPA=0xffffffff WPR=0xffffffff WPR_CFG=0xfffff0ff
 CMPUNLOCK: POST-WRITE SS0=0x88888888 SS1=0x00000008 CFG1=0x02779000 LMR=0x0000020b (devId=0x20c2)
 CMPUNLOCK: PCIe retrain done (polls=1): LinkCtrlStat=0x... speed=2 width=x16
-CMPUNLOCK: PCIe P2P caps forced to OK
+CMPUNLOCK: PCIe P2P caps forced to OK (--p2p)
 ```
 
 Non-zero Booter status codes during the early PLM rounds are common and harmless as long as the register reads back correctly and the boot completes — the table retries each gate anyway.

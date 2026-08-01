@@ -11,16 +11,24 @@ LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 CONFIGURE_IOMMU=0
 MCLK_NDIV=""
 MCLK_TIMINGS=""
+ENABLE_P2P=""
 for arg in "$@"; do
     case "${arg}" in
         --iommu) CONFIGURE_IOMMU=1 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
+        --p2p) ENABLE_P2P=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N]
+Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
 
   --iommu         Add iommu=pt to the kernel command line (see README for details)
+  --p2p           Force GPU-to-GPU P2P on. GSP reports it as unsupported on a
+                  CMP; this overrides that. Off by default because the override
+                  only makes the driver *advertise* P2P — where the host cannot
+                  actually carry it, transfers time out instead of falling back
+                  to staging through system memory. Enable it, then verify with
+                  a real peer-to-peer transfer before relying on it.
   --mclk-ndiv=N   HBM memory clock: set PLL multiplier (30-80), N * 27 MHz.
                   Works on any VBIOS, on both 0x20C2 and 0x2082. Stock is 64 on
                   8GB 300W, 54 on 8GB 250W, 45 on 10GB. Without this flag the
@@ -260,6 +268,16 @@ else
 fi
 export CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}"
 
+if [[ -n "${ENABLE_P2P}" ]]; then
+    ok "GPU-to-GPU P2P forced on"
+    warn "This only makes the driver advertise P2P. If the host cannot actually"
+    warn "carry it, transfers time out rather than falling back to system memory."
+    warn "Verify with a real peer-to-peer copy before relying on it."
+else
+    info "P2P left as GSP reports it (use --p2p to force it on)"
+fi
+export CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}"
+
 step "Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
 [[ ${#SUPPORTED_VERSIONS[@]} -gt 0 ]] || die "No supported versions listed in driver/VERSION"
 if [[ -d /sys/firmware/efi ]] && command -v mokutil &>/dev/null; then
@@ -315,6 +333,7 @@ chmod +x "${SCRIPT_DIR}/driver/build.sh"
 CMPUNLOCKER_DRIVER_VERSION="${detected}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
 CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
+CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
     "${SCRIPT_DIR}/driver/build.sh"
 ok "Patched modules installed"
 
@@ -499,6 +518,9 @@ if [[ -n "${MCLK_NDIV}" ]]; then
 fi
 if [[ -n "${MCLK_TIMINGS}" ]]; then
     echo "DRAM timings: ${MCLK_TIMINGS}% (verify: sudo dmesg | grep TIMING_SCALE)"
+fi
+if [[ -n "${ENABLE_P2P}" ]]; then
+    echo "P2P: forced on (verify with a real peer-to-peer copy)"
 fi
 echo ""
 echo "Next:"

@@ -175,16 +175,33 @@ cmpUnlockIsTarget(OBJGPU *pGpu)
     return (devId == CMPUNLOCK_DEVID_8GB || devId == CMPUNLOCK_DEVID_10GB);
 }
 
+/*
+ * Opt-in, because forcing the caps is not the same as P2P working.
+ *
+ * GSP reports P2P as unsupported on a CMP. Overriding that makes the driver
+ * advertise it, and on a host where the path actually carries traffic it does
+ * work. Where it does not - the wrong PCIe topology, ACS in the way, no IOMMU
+ * passthrough - the override is worse than the restriction: everything claims
+ * P2P is available, then transfers time out instead of quietly falling back to
+ * staging through system memory.
+ *
+ * So this stays behind --p2p and off by default. Compiled out entirely when
+ * the flag is absent; the hook in gpu.c then costs nothing.
+ */
 void
 cmpUnlockForceP2PCaps(OBJGPU *pGpu)
 {
+#ifdef CMPUNLOCK_ENABLE_P2P
     if (!cmpUnlockIsTarget(pGpu))
         return;
 
     pGpu->pcieP2PReadCaps  = 0;
     pGpu->pcieP2PWriteCaps = 0;
 
-    NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: PCIe P2P caps forced to OK\n");
+    NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: PCIe P2P caps forced to OK (--p2p)\n");
+#else
+    (void)pGpu;
+#endif
 }
 
 static NvU64
