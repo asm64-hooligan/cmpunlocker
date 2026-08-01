@@ -12,17 +12,22 @@ CONFIGURE_IOMMU=0
 MCLK_NDIV=""
 MCLK_TIMINGS=""
 ENABLE_P2P=""
+VERBOSE=0
 for arg in "$@"; do
     case "${arg}" in
         --iommu) CONFIGURE_IOMMU=1 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
         --p2p) ENABLE_P2P=1 ;;
+        -v|--verbose) VERBOSE=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
+Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [-v]
 
   --iommu         Add iommu=pt to the kernel command line (see README for details)
+  -v, --verbose   Show the full build output instead of a progress bar. The
+                  build log is kept either way, and is printed automatically
+                  if something fails.
   --p2p           Force GPU-to-GPU P2P on. GSP reports it as unsupported on a
                   CMP; this overrides that. Off by default because the override
                   only makes the driver *advertise* P2P — where the host cannot
@@ -60,13 +65,23 @@ EOF
     esac
 done
 
-exec > >(tee -a "${LOG_FILE}") 2>&1
-
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+#
+# Decide on colour before stdout becomes a pipe into tee - checking -t 1 after
+# the redirect below always says "not a terminal" and silently kills colour.
+#
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+    DIM='\033[2m'; NC='\033[0m'
 else
-    RED=""; GREEN=""; YELLOW=""; CYAN=""; NC=""
+    RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""
 fi
+
+# Progress goes straight to the terminal, so it never reaches the log.
+TTY_OUT=""
+{ : > /dev/tty; } 2>/dev/null && TTY_OUT=/dev/tty
+
+# Colour is for the terminal; the log gets it stripped so it stays greppable.
+exec > >(tee >(sed -u 's/\x1b\[[0-9;]*[mK]//g' >> "${LOG_FILE}")) 2>&1
 
 info() { echo -e "${CYAN}==>${NC} $*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
@@ -74,12 +89,39 @@ warn() { echo -e "${YELLOW}!${NC} $*"; }
 err()  { echo -e "${RED}✗${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
-step() {
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}$*${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+STEP_TOTAL=5
+STEP_NOW=0
+
+progress_bar() {
+    local cur="$1" tot="$2" w="${3:-20}" filled i out=""
+    (( tot > 0 )) || tot=1
+    filled=$(( cur * w / tot ))
+    (( filled > w )) && filled=${w}
+    for ((i = 0; i < w; i++)); do
+        if (( i < filled )); then out+="█"; else out+="░"; fi
+    done
+    printf '%s %3d%%' "${out}" $(( cur * 100 / tot ))
 }
+
+step() {
+    STEP_NOW=$((STEP_NOW + 1))
+    echo ""
+    echo -e "${CYAN}[${STEP_NOW}/${STEP_TOTAL}]${NC} ${DIM}$(progress_bar "${STEP_NOW}" "${STEP_TOTAL}")${NC}  ${CYAN}$*${NC}"
+}
+
+#
+# Anything that falls over without its own message still has to say where it
+# happened and where to look, rather than just exiting on set -e.
+#
+on_error() {
+    local rc=$? line="$1"
+    [[ -n "${TTY_OUT}" ]] && printf '\r\033[K' > "${TTY_OUT}"
+    echo ""
+    err "Install failed at ${0##*/} line ${line} (exit ${rc})"
+    err "Full log: ${LOG_FILE}"
+    exit "${rc}"
+}
+trap 'on_error ${LINENO}' ERR
 
 #
 # Ask a yes/no question. Reads from the terminal rather than stdin, because
@@ -334,7 +376,18 @@ CMPUNLOCKER_DRIVER_VERSION="${detected}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
 CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
 CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
-    "${SCRIPT_DIR}/driver/build.sh"
+CMPUNLOCKER_VERBOSE="${VERBOSE}" \
+    "${SCRIPT_DIR}/driver/build.sh" || {
+    #
+    # build.sh has already printed the compiler errors and the tail of its own
+    # log, so do not bury that under another wall of text.
+    #
+    echo ""
+    err "Driver build failed — see the output above"
+    err "Install log: ${LOG_FILE}"
+    err "Retry with -v to watch the full build"
+    exit 1
+}
 ok "Patched modules installed"
 
 step "Configuring IOMMU (passthrough)"

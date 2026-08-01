@@ -25,7 +25,53 @@ fi
 info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
 ok()   { echo -e "${GREEN}[ OK ]${NC}  $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-die()  { echo -e "${RED}[FAIL]${NC}  $*" >&2; exit 1; }
+err()  { echo -e "${RED}[FAIL]${NC}  $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+VERBOSE="${CMPUNLOCKER_VERBOSE:-0}"
+
+#
+# Progress is written straight to the terminal, never to stdout, so it stays
+# out of the install log no matter how the caller redirects us.
+#
+TTY_OUT=""
+{ : > /dev/tty; } 2>/dev/null && TTY_OUT=/dev/tty
+
+tty_progress() { [[ -n "${TTY_OUT}" ]] && printf '\r\033[K%s' "$*" > "${TTY_OUT}"; return 0; }
+tty_clear()    { [[ -n "${TTY_OUT}" ]] && printf '\r\033[K' > "${TTY_OUT}"; return 0; }
+
+progress_bar() {
+    local cur="$1" tot="$2" w="${3:-24}" filled i out=""
+    (( tot > 0 )) || tot=1
+    filled=$(( cur * w / tot ))
+    (( filled > w )) && filled=${w}
+    for ((i = 0; i < w; i++)); do
+        if (( i < filled )); then out+="█"; else out+="░"; fi
+    done
+    printf '%s %3d%%' "${out}" $(( cur * 100 / tot ))
+}
+
+#
+# On failure the quiet output is useless on its own, so surface the compiler
+# errors and the tail of the captured log before giving up.
+#
+dump_failure() {
+    local log="$1" label="$2"
+    echo ""
+    err "${label} failed."
+    if [[ -s "${log}" ]]; then
+        if grep -qE 'error:|[Ee]rror [0-9]|FAILED|fatal error|undefined reference|No rule to make' "${log}"; then
+            echo ""
+            echo "--- errors ---"
+            grep -nE 'error:|[Ee]rror [0-9]|FAILED|fatal error|undefined reference|No rule to make' "${log}" | head -25
+        fi
+        echo ""
+        echo "--- last 40 lines ---"
+        tail -40 "${log}"
+        echo ""
+        err "Full output: ${log}"
+    fi
+}
 
 version_supported() {
     local v="$1"
@@ -137,22 +183,75 @@ cd "${SRC_DIR}"
 shopt -s nullglob
 patches=("${PATCH_DIR}"/*.patch)
 [[ ${#patches[@]} -gt 0 ]] || die "No patches found in ${PATCH_DIR}"
+PATCH_LOG="${BUILD_ROOT}/patch.log"
+: > "${PATCH_LOG}"
 for p in "${patches[@]}"; do
-    info "  $(basename "${p}")"
-    patch -p1 < "${p}"
+    if ! patch -p1 --forward < "${p}" >> "${PATCH_LOG}" 2>&1; then
+        dump_failure "${PATCH_LOG}" "Patch $(basename "${p}")"
+        exit 1
+    fi
 done
-ok "All patches applied"
+ok "Applied ${#patches[@]} hook patches"
 
 mkdir -p "${INSTALL_MOD_DIR}"
 
-info "Building modules for kernel ${KVER}..."
 cd "${SRC_DIR}"
 find . -name "*.sh" -exec chmod +x {} + 2>/dev/null || true
 rm -rf src/nvidia/_out src/nvidia-modeset/_out kernel-open/conftest 2>/dev/null || true
-make clean 2>/dev/null || true
+make clean >/dev/null 2>&1 || true
 JOBS="$(nproc)"
-make -j"${JOBS}" modules SYSSRC="${KSRC}"
-ok "Modules built"
+MAKE_LOG="${BUILD_ROOT}/make.log"
+OBJCOUNT_FILE="${BUILD_ROOT}/.objcount"
+
+#
+# The kernel build prints a line per file - thousands of them. Capture that to
+# a log and show a bar instead, using the previous build's file count as the
+# scale. The first build on a machine has nothing to scale against, so it just
+# counts up.
+#
+build_modules() {
+    if [[ "${VERBOSE}" == "1" ]]; then
+        make -j"${JOBS}" modules SYSSRC="${KSRC}"
+        return $?
+    fi
+
+    local expected=0 pid rc n start
+    [[ -r "${OBJCOUNT_FILE}" ]] && expected="$(cat "${OBJCOUNT_FILE}" 2>/dev/null || echo 0)"
+    [[ "${expected}" =~ ^[0-9]+$ ]] || expected=0
+
+    start="${SECONDS}"
+    make -j"${JOBS}" modules SYSSRC="${KSRC}" > "${MAKE_LOG}" 2>&1 &
+    pid=$!
+
+    while kill -0 "${pid}" 2>/dev/null; do
+        n="$(grep -cE '^\s*(CC|LD|AR|CONFTEST)' "${MAKE_LOG}" 2>/dev/null || true)"
+        [[ "${n}" =~ ^[0-9]+$ ]] || n=0
+        if (( expected > 0 )); then
+            tty_progress "  $(progress_bar "${n}" "${expected}")  ${n}/${expected} files  $((SECONDS - start))s"
+        else
+            tty_progress "  compiling... ${n} files  $((SECONDS - start))s"
+        fi
+        sleep 0.4
+    done
+
+    wait "${pid}"; rc=$?
+    tty_clear
+
+    n="$(grep -cE '^\s*(CC|LD|AR|CONFTEST)' "${MAKE_LOG}" 2>/dev/null || true)"
+    [[ "${n}" =~ ^[0-9]+$ ]] || n=0
+    if (( rc == 0 )); then
+        echo "${n}" > "${OBJCOUNT_FILE}"
+        ok "Built ${n} files in $((SECONDS - start))s for kernel ${KVER}"
+    fi
+    return "${rc}"
+}
+
+info "Building modules for kernel ${KVER} (${JOBS} jobs)..."
+if ! build_modules; then
+    dump_failure "${MAKE_LOG}" "Module build"
+    exit 1
+fi
+
 info "Installing modules to ${INSTALL_MOD_DIR}..."
 mkdir -p "${INSTALL_MOD_DIR}"
 
@@ -162,35 +261,50 @@ mapfile -t KO_FILES < <(find "${SRC_DIR}" -type f \( \
     ! -path '*/conftest/*' | sort -u)
 [[ ${#KO_FILES[@]} -gt 0 ]] || die "No built nvidia*.ko found"
 
+INSTALLED=()
 for ko in "${KO_FILES[@]}"; do
     base="$(basename "${ko}")"
     install -m 0644 "${ko}" "${INSTALL_MOD_DIR}/${base}"
-    ok "Installed ${base}"
+    INSTALLED+=("${base%.ko}")
 done
+ok "Installed ${#INSTALLED[@]} modules: ${INSTALLED[*]}"
 
 depmod -a "${KVER}"
-ok "depmod complete"
+
+INITRAMFS_LOG="${BUILD_ROOT}/initramfs.log"
+
+# Runs for a minute or so and is noisy; capture it and only speak up on failure.
+run_quiet() {
+    local label="$1"; shift
+    if [[ "${VERBOSE}" == "1" ]]; then
+        "$@" && return 0
+        dump_failure /dev/null "${label}"
+        return 1
+    fi
+    tty_progress "  ${label}..."
+    if "$@" > "${INITRAMFS_LOG}" 2>&1; then
+        tty_clear
+        return 0
+    fi
+    tty_clear
+    dump_failure "${INITRAMFS_LOG}" "${label}"
+    return 1
+}
+
 rebuild_initramfs() {
     if command -v update-initramfs &>/dev/null; then
-        info "Rebuilding initramfs (update-initramfs)..."
-        update-initramfs -u -k "${KVER}"
-        ok "initramfs rebuilt"
-        return 0
+        run_quiet "Rebuilding initramfs (update-initramfs)" \
+            update-initramfs -u -k "${KVER}" || return 1
+    elif command -v dracut &>/dev/null; then
+        run_quiet "Rebuilding initramfs (dracut)" \
+            dracut --force --kver "${KVER}" || return 1
+    elif command -v mkinitcpio &>/dev/null; then
+        run_quiet "Rebuilding initramfs (mkinitcpio)" mkinitcpio -P || return 1
+    else
+        warn "No initramfs tool found — rebuild manually before rebooting"
+        return 1
     fi
-    if command -v dracut &>/dev/null; then
-        info "Rebuilding initramfs (dracut)..."
-        dracut --force --kver "${KVER}"
-        ok "initramfs rebuilt"
-        return 0
-    fi
-    if command -v mkinitcpio &>/dev/null; then
-        info "Rebuilding initramfs (mkinitcpio)..."
-        mkinitcpio -P
-        ok "initramfs rebuilt"
-        return 0
-    fi
-    warn "No initramfs tool found — rebuild manually before rebooting"
-    return 1
+    ok "initramfs rebuilt"
 }
 
 rebuild_initramfs || true
