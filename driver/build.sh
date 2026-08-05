@@ -270,6 +270,7 @@ done
 ok "Installed ${#INSTALLED[@]} modules: ${INSTALLED[*]}"
 
 depmod -a "${KVER}"
+sync   # flush modules.dep to disk — important if VM is hard-killed before reboot
 
 INITRAMFS_LOG="${BUILD_ROOT}/initramfs.log"
 
@@ -315,6 +316,7 @@ if [[ -n "${resolved}" ]]; then
         warn "Resolved nvidia.ko is not under updates/cmpunlocker/"
     fi
 fi
+loads_before="$(dmesg 2>/dev/null | grep -c 'loading NVIDIA UNIX' || true)"
 info "Attempting to unload NVIDIA modules..."
 systemctl stop nvidia-persistenced 2>/dev/null || true
 systemctl stop nvidia-fabricmanager 2>/dev/null || true
@@ -332,10 +334,16 @@ if ! lsmod | grep -q '^nvidia '; then
         modprobe nvidia-drm 2>/dev/null || true
         reload_ok=1
         ok "Patched NVIDIA modules loaded"
-        running_src="$(cat /sys/module/nvidia/srcversion 2>/dev/null || true)"
-        patched_src="$(modinfo -F srcversion "${INSTALL_MOD_DIR}/nvidia.ko" 2>/dev/null || true)"
-        if [[ -n "${running_src}" && -n "${patched_src}" && "${running_src}" != "${patched_src}" ]]; then
-            warn "Loaded nvidia srcversion (${running_src}) != patched (${patched_src})"
+        #
+        # srcversion cannot answer this: it hashes the kernel-open sources,
+        # and cmpunlock.c arrives as part of the prebuilt nv-kernel.o blob, so
+        # it stays identical no matter what the unlock does. Count the module's
+        # own load banner instead - if it did not go up, nothing was reloaded
+        # and the driver in memory is still the previous build.
+        #
+        loads_after="$(dmesg 2>/dev/null | grep -c 'loading NVIDIA UNIX' || true)"
+        if [[ "${loads_after}" == "${loads_before}" ]]; then
+            warn "nvidia did not actually reload — the running driver is still the old build"
             reload_ok=0
         fi
     else

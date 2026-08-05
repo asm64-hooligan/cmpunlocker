@@ -176,6 +176,33 @@ cmpUnlockIsTarget(OBJGPU *pGpu)
 }
 
 /*
+ * Escape hatch.
+ *
+ * The optional features are compiled in, so a value that wedges the GPU during
+ * driver init leaves a machine that cannot boot far enough to reinstall - the
+ * only way out would be pulling the card. This gives a way to skip all of them
+ * from the boot loader instead:
+ *
+ *   nvidia.NVreg_RegistryDwords=cmpSafe=1
+ *
+ * The base unlock (memory geometry, SM, PCIe) still runs; only the tunables
+ * that can be set to a bad value are skipped.
+ */
+static NvBool
+cmpUnlockSafeMode(OBJGPU *pGpu)
+{
+    NvU32 data = 0;
+
+    if (osReadRegistryDword(pGpu, "cmpSafe", &data) == NV_OK && data != 0)
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "CMPUNLOCK: cmpSafe=1 - skipping MCLK overclock and timing scaling\n");
+        return NV_TRUE;
+    }
+    return NV_FALSE;
+}
+
+/*
  * Opt-in, because forcing the caps is not the same as P2P working.
  *
  * GSP reports P2P as unsupported on a CMP. Overriding that makes the driver
@@ -929,7 +956,8 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 
     /*
      * Booter Load is the last thing that can silently undo the unlock, so
-     * report what the gated registers actually ended up holding.
+     * report what the gated registers actually ended up holding. Worth having
+     * in safe mode too - that is when you are diagnosing something.
      */
     NV_PRINTF(LEVEL_ERROR,
               "CMPUNLOCK: post-BooterLoad verify PLM=0x%08x SS0=0x%08x SS1=0x%08x "
@@ -939,6 +967,9 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               GPU_REG_RD32(pGpu, CMP_REG_SM_SPEED_1),
               GPU_REG_RD32(pGpu, CMP_REG_FBPA_CFG1),
               GPU_REG_RD32(pGpu, CMP_REG_MMU_LMR));
+
+    if (cmpUnlockSafeMode(pGpu))
+        return;
 
 #ifdef CMPUNLOCK_MCLK_TIMINGS
     /* Must precede the PLL cycle below: the clock has to come up on the
@@ -1057,6 +1088,8 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 {
 #if defined(CMPUNLOCK_MCLK_TIMINGS) || defined(CMPUNLOCK_MCLK_NDIV)
     if (!cmpUnlockIsTarget(pGpu))
+        return;
+    if (cmpUnlockSafeMode(pGpu))
         return;
 #endif
 
