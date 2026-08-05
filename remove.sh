@@ -26,6 +26,11 @@ if [[ "${1:-}" != "--yes" && "${1:-}" != "-y" ]]; then
     echo "  - Rebuilds initramfs"
     echo "  - Reloads stock NVIDIA modules (brief display interruption)"
     echo "  - Restores the pre-install kernel command line (reverts IOMMU changes)"
+    echo "  - Removes the kernel-update hooks and the boot-time rebuild service"
+    echo "  - Releases the NVIDIA package version pin"
+    echo "  - Unmasks nvidia-fallback.service and unblocks nouveau"
+    echo ""
+    echo "  Logs under /var/log/cmpunlocker/ are kept."
     echo ""
     echo "Run: sudo ./remove.sh --yes"
     exit 1
@@ -61,6 +66,44 @@ if (( iommu_restored )); then
 else
     info "No IOMMU config backup found — kernel command line left as-is"
 fi
+
+info "Removing kernel-update persistence..."
+
+#
+# Unpin first: the helper that knows how to undo the hold lives in the
+# directory removed a few lines further down.
+#
+if [[ -x /usr/lib/cmpunlocker/pin-packages.sh ]]; then
+    /usr/lib/cmpunlocker/pin-packages.sh unpin || true
+fi
+
+if command -v systemctl &>/dev/null; then
+    systemctl disable --now cmpunlocker-rebuild.service 2>/dev/null || true
+    #
+    # Unmask rather than enable: nvidia-fallback is the distro's unit and
+    # whatever state it was in before the install is the distro's business.
+    #
+    systemctl unmask nvidia-fallback.service 2>/dev/null || true
+fi
+
+rm -f /etc/systemd/system/cmpunlocker-rebuild.service
+rm -f /etc/kernel/install.d/95-cmpunlocker.install
+rm -f /etc/kernel/postinst.d/cmpunlocker
+rm -f /etc/kernel/postrm.d/cmpunlocker
+rm -f /etc/pacman.d/hooks/95-cmpunlocker.hook
+rm -f /etc/depmod.d/cmpunlocker.conf
+rm -f /etc/modprobe.d/cmpunlocker.conf
+rm -rf /usr/lib/cmpunlocker
+rm -rf /var/lib/cmpunlocker
+rm -rf /etc/cmpunlocker
+
+if [[ -f /etc/pacman.conf.cmpunlocker.bak ]]; then
+    mv -f /etc/pacman.conf.cmpunlocker.bak /etc/pacman.conf
+    ok "Restored /etc/pacman.conf from pre-install backup"
+fi
+
+command -v systemctl &>/dev/null && systemctl daemon-reload 2>/dev/null || true
+ok "Kernel hooks, boot service and package pins removed"
 
 info "Removing patched modules..."
 mod_removed=0

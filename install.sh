@@ -12,6 +12,8 @@ CONFIGURE_IOMMU=0
 MCLK_NDIV=""
 MCLK_TIMINGS=""
 ENABLE_P2P=""
+INSTALL_PERSIST=1
+PIN_PACKAGES=1
 VERBOSE=0
 for arg in "$@"; do
     case "${arg}" in
@@ -19,10 +21,13 @@ for arg in "$@"; do
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
         --p2p) ENABLE_P2P=1 ;;
+        --no-persist) INSTALL_PERSIST=0 ;;
+        --no-pin) PIN_PACKAGES=0 ;;
         -v|--verbose) VERBOSE=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [-v]
+Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
+                         [--no-persist] [--no-pin] [-v]
 
   --iommu         Add iommu=pt to the kernel command line (see README for details)
   -v, --verbose   Show the full build output instead of a progress bar. The
@@ -48,6 +53,27 @@ Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [-
                   data silently or wedges the memory controller.
                   Scaled: tRC tRFC tRAS tRP tRCD tWR tFAW tRRD.
                   Never touched: CL, WL, tCCD.
+  --no-persist    Do not survive kernel updates. By default the installer wires
+                  the patched modules into the kernel-update path, so a new
+                  kernel gets them rebuilt automatically instead of booting on
+                  the stock driver (8GB) or falling back to nouveau. Use this
+                  only if you manage module rebuilds yourself.
+  --no-pin        Do not pin the NVIDIA packages. By default they are held at
+                  the currently installed version, because a driver upgrade to
+                  a version cmpunlocker does not support makes every later
+                  rebuild fail and drops the card back to stock. With this flag
+                  the packages upgrade freely and you take that risk on.
+
+Surviving kernel updates (on by default):
+  A kernel update rebuilds the patched modules through a package-manager hook
+  (/etc/kernel/install.d, /etc/kernel/postinst.d, or a pacman hook) before you
+  reboot. cmpunlocker-rebuild.service is the safety net for anything the hook
+  misses — it holds boot until the modules exist rather than letting the card
+  come up unpatched. Check state with:
+
+    systemctl status cmpunlocker-rebuild
+    sudo /usr/lib/cmpunlocker/pin-packages.sh status
+    cat /var/log/cmpunlocker/rebuild-$(uname -r).log
 
 Memory geometry is selected automatically from PCI device ID:
   10de:20c2 → 8GB card → 64GB unlock
@@ -89,7 +115,7 @@ warn() { echo -e "${YELLOW}!${NC} $*"; }
 err()  { echo -e "${RED}✗${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
-STEP_TOTAL=5
+STEP_TOTAL=6
 STEP_NOW=0
 
 progress_bar() {
@@ -390,6 +416,33 @@ CMPUNLOCKER_VERBOSE="${VERBOSE}" \
 }
 ok "Patched modules installed"
 
+step "Surviving kernel updates"
+PERSIST_STATUS="skipped"
+if (( INSTALL_PERSIST == 0 )); then
+    info "Persistence not requested (--no-persist)"
+    warn "A kernel update will boot on the stock driver (8GB) until you re-run this installer"
+elif [[ ! -x "${SCRIPT_DIR}/persist/install-persist.sh" ]]; then
+    warn "persist/install-persist.sh missing — kernel updates will not be survived"
+else
+    #
+    # The persistence layer is deliberately not fatal: the patched modules for
+    # the running kernel are already installed and working at this point, and
+    # failing the whole install over the automation would be a worse outcome.
+    #
+    if CMPUNLOCKER_DRIVER_VERSION="${detected}" \
+       CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
+       CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
+       CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
+       CMPUNLOCKER_PIN_PACKAGES="${PIN_PACKAGES}" \
+           "${SCRIPT_DIR}/persist/install-persist.sh"; then
+        PERSIST_STATUS="installed"
+    else
+        PERSIST_STATUS="failed"
+        warn "Could not install kernel-update persistence — see the log"
+        warn "The patched modules for $(uname -r) are installed and working regardless"
+    fi
+fi
+
 step "Configuring IOMMU (passthrough)"
 IOMMU_STATUS="skipped"
 IOMMU_PARAMS=""
@@ -575,6 +628,19 @@ fi
 if [[ -n "${ENABLE_P2P}" ]]; then
     echo "P2P: forced on (verify with a real peer-to-peer copy)"
 fi
+case "${PERSIST_STATUS}" in
+    installed)
+        PIN_RESULT="$(cat /var/lib/cmpunlocker/state/pin-status 2>/dev/null || echo unknown)"
+        case "${PIN_RESULT}" in
+            ok)      echo "Kernel updates: modules rebuilt automatically, NVIDIA packages pinned" ;;
+            failed)  echo "Kernel updates: modules rebuilt automatically"
+                     echo "                NVIDIA packages NOT pinned — see the warning above" ;;
+            *)       echo "Kernel updates: modules rebuilt automatically, packages not pinned" ;;
+        esac
+        ;;
+    failed)  echo "Kernel updates: NOT survived (persistence install failed)" ;;
+    skipped) echo "Kernel updates: NOT survived (--no-persist)" ;;
+esac
 echo ""
 echo "Next:"
 echo -e "  1. Cold reboot: ${CYAN}sudo shutdown -h now${NC}  (then power on)"

@@ -68,6 +68,45 @@ sudo ./install.sh --iommu
 
 Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
 
+### Surviving Kernel Updates
+
+The patched modules are built against one specific kernel. Without help, the first kernel update leaves the card on the stock driver — reporting 8GB instead of 64GB — or on nouveau. The installer wires the rebuild into the kernel update path by default, so this does not happen.
+
+A new kernel triggers a rebuild through the package manager hook for your distro, **before** you reboot:
+
+| Distro | Hook |
+|---|---|
+| Fedora, RHEL, openSUSE | `/etc/kernel/install.d/95-cmpunlocker.install` |
+| Debian, Ubuntu, HiveOS | `/etc/kernel/postinst.d/cmpunlocker` |
+| Arch | `/etc/pacman.d/hooks/95-cmpunlocker.hook` |
+
+`cmpunlocker-rebuild.service` is the safety net for what hooks cannot see — a hand-built kernel, a restored snapshot, or a hook that ran before the kernel headers were unpacked. It holds the boot until the patched modules exist, because a rig that silently comes up at 8GB is worse than one slow boot. It gives up after three consecutive failures rather than delaying every boot forever.
+
+Two more things keep the stock driver from winning:
+
+- `/etc/depmod.d/cmpunlocker.conf` makes the patched modules outrank the stock ones. The distro driver is rebuilt on every kernel update too, into `extra/` (akmod) or `updates/dkms/` (dkms), right next to ours.
+- `nvidia-fallback.service` is masked and nouveau is blacklisted, so a driver that fails to load does not hand the card to nouveau.
+
+**The NVIDIA packages are pinned to their installed version.** A driver upgrade past the versions in `driver/VERSION` makes every later rebuild fail, which is the rollback this is meant to prevent. GPU *firmware* packages are deliberately left unpinned — they belong to `linux-firmware` and holding them back can wedge system upgrades.
+
+```bash
+sudo ./install.sh --no-pin       # allow driver upgrades, accept the risk
+sudo ./install.sh --no-persist   # manage rebuilds yourself
+```
+
+Checking on it:
+
+```bash
+systemctl status cmpunlocker-rebuild
+sudo /usr/lib/cmpunlocker/pin-packages.sh status
+cat /var/log/cmpunlocker/rebuild-$(uname -r).log
+sudo /usr/lib/cmpunlocker/rebuild.sh          # rebuild for the running kernel by hand
+```
+
+To take a pinned driver upgrade: `sudo /usr/lib/cmpunlocker/pin-packages.sh unpin`, upgrade, then re-run `install.sh` (which re-pins). If the new driver version is not in `driver/VERSION`, the build will refuse it.
+
+Everything above is undone by `./remove.sh --yes`.
+
 ---
 
 ## Verify
@@ -117,6 +156,7 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)           | Opt-in, `--p2p` |
 | HBM2e memory overclock/downclock                        | Working         |
 | Persistence across reboot (patched modules)             | Working         |
+| Persistence across kernel updates (auto-rebuild)        | Working         |
 
 ---
 
