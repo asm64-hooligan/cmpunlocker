@@ -11,7 +11,7 @@ Below are memory and performance results after applying the unlock:
 
 ### Unlock Results
 
-<img width="777" height="973" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
+<img width="497" height="623" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
 
 ---
 
@@ -35,7 +35,9 @@ sudo ./install.sh
 
 Then perform a cold reboot (full power off, then boot). The correct memory geometry is selected automatically from the PCI device ID (`0x20C2` = 8GB -> 64GB, `0x2082` = 10GB -> 40GB).
 
-### HBM Memory Clock
+### HBM Memory overclock
+<details>
+<summary> HBM Memory overclock </summary>
 
 `--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N * 27` MHz. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB).
 
@@ -58,8 +60,12 @@ Without the flag the overclock is compiled out entirely. The multiplier is compi
 
 If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
 
+</details>
+
 ### IOMMU
 
+<details> 
+<summary> IOMMU </summary>
 NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. The installer does **not** touch the kernel command line by default:
 
 ```bash
@@ -68,7 +74,12 @@ sudo ./install.sh --iommu
 
 Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
 
-### Surviving Kernel Updates
+</details>
+
+### Surviving Kernel Updates (Anti-rollback)
+
+<details> 
+<summary> Surviving Kernel Updates </summary>
 
 The patched modules are built against one specific kernel. Without help, the first kernel update leaves the card on the stock driver — reporting 8GB instead of 64GB — or on nouveau. The installer wires the rebuild into the kernel update path by default, so this does not happen.
 
@@ -108,7 +119,7 @@ sudo /usr/lib/cmpunlocker/rebuild.sh          # rebuild for the running kernel b
 To take a pinned driver upgrade: `sudo /usr/lib/cmpunlocker/pin-packages.sh unpin`, upgrade, then re-run `install.sh` (which re-pins). If the new driver version is not in `driver/VERSION`, the build will refuse it.
 
 Everything above is undone by `./remove.sh --yes`.
-
+</details> 
 ---
 
 ## Verify
@@ -150,15 +161,14 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 
 ## What Gets Unlocked
 
-| Feature                                                 | Status          |
-|---------------------------------------------------------|-----------------|
-| Full SM compute throughput (SS0/SS1)                    | Working         |
-| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working         |
-| PCIe Gen 2 speeds                                       | Working         |
-| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)           | Opt-in, `--p2p` |
-| HBM2e memory overclock/downclock                        | Working         |
-| Persistence across reboot (patched modules)             | Working         |
-| Persistence across kernel updates (auto-rebuild)        | Working         |
+| Feature                                                          | Status      |
+|------------------------------------------------------------------|-------------|
+| Full SM compute throughput (SS0/SS1)                             | Working     |
+| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards)          | Working     |
+| PCIe Gen 2 speeds                                                | Working     |
+| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress |
+| HBM2e memory overclock/downclock                                 | Working     |
+| Persistence across kernel updates (auto-rebuild) (anti-rollback) | Working     |
 
 ---
 
