@@ -169,7 +169,7 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress |
 | HBM2e memory overclock/downclock                                 | Working     |
 | Persistence across kernel updates (auto-rebuild) (anti-rollback) | Working     |
-| BAR1 64mb->64gb                                                  | Working     |
+| BAR1 64mb->64gb (requires Above 4G Decoding in BIOS)             | Working     |
 
 ---
 
