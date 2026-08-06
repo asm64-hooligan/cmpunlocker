@@ -20,19 +20,32 @@ echo -e "${CYAN}║               cmpunlocker              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-if [[ "${1:-}" != "--yes" && "${1:-}" != "-y" ]]; then
+CONFIRMED=0
+RELOAD_DRIVER=0
+for arg in "$@"; do
+    case "${arg}" in
+        --yes|-y) CONFIRMED=1 ;;
+        --reload) RELOAD_DRIVER=1 ;;
+    esac
+done
+
+if (( CONFIRMED == 0 )); then
     warn "This removes cmpunlocker patched kernel modules:"
     echo "  - Removes /lib/modules/*/updates/cmpunlocker/"
     echo "  - Rebuilds initramfs"
-    echo "  - Reloads stock NVIDIA modules (brief display interruption)"
     echo "  - Restores the pre-install kernel command line (reverts IOMMU changes)"
     echo "  - Removes the kernel-update hooks and the boot-time rebuild service"
     echo "  - Releases the NVIDIA package version pin"
     echo "  - Unmasks nvidia-fallback.service and unblocks nouveau"
     echo ""
+    echo "  The driver already in memory is left alone — reboot to finish."
     echo "  Logs under /var/log/cmpunlocker/ are kept."
     echo ""
     echo "Run: sudo ./remove.sh --yes"
+    echo ""
+    echo "  --reload  also swap the running driver for the stock one now,"
+    echo "            instead of at the next boot. On a CMP this can hang the"
+    echo "            machine, so it is off by default — see README."
     exit 1
 fi
 
@@ -114,6 +127,13 @@ for mod_dir in /lib/modules/*/updates/cmpunlocker; do
         kernel="$(basename "$(dirname "$(dirname "${mod_dir}")")")"
         rm -rf "${mod_dir}"
         depmod -a "${kernel}" 2>/dev/null || true
+        #
+        # depmod's output sits in the page cache until something flushes it.
+        # A power cut or hard reset before that leaves a zero-length
+        # modules.dep, and then nothing resolves on the next boot - not the
+        # NIC driver, not storage. Cheap insurance against an unbootable box.
+        #
+        sync
         ok "Removed patched modules for kernel ${kernel}"
         mod_removed=$((mod_removed + 1))
         kernels_touched+=("${kernel}")
@@ -136,9 +156,26 @@ if [[ ${#kernels_touched[@]} -gt 0 ]]; then
     ok "initramfs rebuilt"
 fi
 
-info "Reloading stock NVIDIA driver..."
-if lsmod | grep -q '^nvidia'; then
-    warn "Unloading NVIDIA modules (display may flicker)"
+#
+# Swapping the running driver is opt-in, because loading the stock one on a
+# CMP 170HX can wedge the machine: the card has no usable display engine, and
+# nvidia-drm binding to it hangs in a way that leaves the kernel answering
+# pings while userspace stops making progress. Nothing needs the swap either -
+# the files are already gone, so the next boot comes up on the stock driver by
+# itself, and a reboot is the documented last step of an uninstall anyway.
+#
+if (( RELOAD_DRIVER == 0 )); then
+    if lsmod | grep -q '^nvidia'; then
+        info "Leaving the running driver in place"
+        echo "  The patched modules are removed from disk, but the copy already in"
+        echo "  memory keeps running until you reboot. That is the safe order."
+        echo "  ./remove.sh --yes --reload swaps it now instead, at the risk of"
+        echo "  hanging the machine on a CMP."
+    fi
+else
+    info "Swapping the running driver for the stock one (--reload)..."
+    warn "This can hang on a CMP 170HX. Reboot instead if it does not return."
+
     for svc in gdm3 sddm lightdm display-manager; do
         systemctl stop "${svc}" 2>/dev/null || true
     done
@@ -146,24 +183,26 @@ if lsmod | grep -q '^nvidia'; then
     killall -9 Xorg Xwayland nvidia-persistenced 2>/dev/null || true
     sleep 1
 
+    #
+    # No rmmod -f fallback: forcing a module out from under a driver that is
+    # still referenced is documented as able to take the kernel down with it,
+    # which is a poor trade when a reboot finishes the job cleanly.
+    #
     for mod in nvidia_drm nvidia_uvm nvidia_modeset nvidia; do
-        modprobe -r "${mod}" 2>/dev/null || true
+        timeout 30 modprobe -r "${mod}" 2>/dev/null || true
     done
     sleep 1
 
     if lsmod | grep -q '^nvidia'; then
-        for mod in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do
-            rmmod -f "${mod}" 2>/dev/null || true
-        done
-    fi
-
-    if modprobe nvidia 2>/dev/null; then
-        modprobe nvidia-modeset 2>/dev/null || true
-        modprobe nvidia-uvm 2>/dev/null || true
-        modprobe nvidia-drm 2>/dev/null || true
-        ok "Stock NVIDIA driver reloaded"
+        warn "Some NVIDIA modules are still in use — reboot to finish cleanup"
+    elif timeout 60 modprobe nvidia 2>/dev/null; then
+        timeout 30 modprobe nvidia-modeset 2>/dev/null || true
+        timeout 30 modprobe nvidia-uvm 2>/dev/null || true
+        timeout 30 modprobe nvidia-drm 2>/dev/null || \
+            warn "nvidia-drm did not load — harmless on a headless card"
+        ok "Stock NVIDIA driver loaded"
     else
-        warn "Could not reload NVIDIA driver — reboot to finish cleanup"
+        warn "Stock driver did not load — reboot to finish cleanup"
     fi
 
     for svc in gdm3 sddm lightdm display-manager; do
@@ -172,14 +211,12 @@ if lsmod | grep -q '^nvidia'; then
             break
         fi
     done
-else
-    warn "NVIDIA modules not loaded — skipping driver reload"
 fi
 
 echo ""
 ok "cmpunlocker removed"
 echo "Log saved to: ${LOG_FILE}"
 echo ""
-echo "If the GPU or display is not working, reboot:"
+echo "Reboot to finish — the card comes back up on the stock driver:"
 echo -e "  ${CYAN}sudo reboot${NC}"
 echo ""

@@ -80,7 +80,21 @@
 /* Booter payload geometry. */
 #define CMP_SIGNATURE_SIZE          0x0000f800ULL
 #define CMP_PAYLOAD_FILL_DWORD      0x000004a7U
-#define CMP_DMEM_PATH               "/lib/firmware/nvidia/ga100/gsp/dmem.bin"
+/*
+ * Optional override for the Booter payload.
+ *
+ * This used to read /lib/firmware/nvidia/ga100/gsp/dmem.bin, which belongs to
+ * the distro's GPU firmware package (nvidia-gpu-firmware on Fedora, part of
+ * linux-firmware). That directory already collects per-driver blobs on every
+ * firmware release, so a future update dropping a dmem.bin there would have
+ * been picked up in preference to the built-in payload and quietly broken the
+ * unlock - with no way to prevent it short of holding back linux-firmware,
+ * which is not something worth doing to a system.
+ *
+ * The path now lives in cmpunlocker's own directory, where nothing else
+ * writes. Absent - which is the normal case - the payload is generated below.
+ */
+#define CMP_DMEM_PATH               "/var/lib/cmpunlocker/dmem.bin"
 
 /* Unlocked framebuffer sizes. */
 #define CMP_FB_BYTES_8GB            0x0000001000000000ULL  /* 64GB */

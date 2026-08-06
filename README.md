@@ -87,7 +87,9 @@ Two more things keep the stock driver from winning:
 - `/etc/depmod.d/cmpunlocker.conf` makes the patched modules outrank the stock ones. The distro driver is rebuilt on every kernel update too, into `extra/` (akmod) or `updates/dkms/` (dkms), right next to ours.
 - `nvidia-fallback.service` is masked and nouveau is blacklisted, so a driver that fails to load does not hand the card to nouveau.
 
-**The NVIDIA packages are pinned to their installed version.** A driver upgrade past the versions in `driver/VERSION` makes every later rebuild fail, which is the rollback this is meant to prevent. GPU *firmware* packages are deliberately left unpinned — they belong to `linux-firmware` and holding them back can wedge system upgrades.
+**The NVIDIA packages are pinned to their installed version.** A driver upgrade past the versions in `driver/VERSION` makes every later rebuild fail, which is the rollback this is meant to prevent. This covers the GSP firmware the driver actually loads, from `/lib/firmware/nvidia/<driver-version>/`, which ships in the driver package itself.
+
+GPU *firmware* packages (`nvidia-gpu-firmware` and friends) are deliberately left unpinned — they belong to `linux-firmware`, and holding them back can wedge system upgrades on a dependency conflict. They are also no longer able to affect the unlock: the optional Booter payload override is read from `/var/lib/cmpunlocker/dmem.bin` rather than from `/lib/firmware/nvidia/ga100/gsp/`, a directory that firmware updates add files to and that no amount of pinning could safely protect.
 
 ```bash
 sudo ./install.sh --no-pin       # allow driver upgrades, accept the risk
@@ -176,6 +178,10 @@ sudo ./remove.sh --yes
 ```
 
 Then perform a cold reboot (full power off, then boot).
+
+This removes the patched modules from disk, undoes the kernel-update hooks, releases the package pin, and rebuilds the initramfs. The driver already running in memory is left alone — the card comes up on the stock driver at the next boot, which is the safe order.
+
+`--reload` swaps the running driver for the stock one immediately instead of waiting for the reboot. It is off by default because loading the stock `nvidia-drm` against a CMP 170HX can wedge the machine: the card has no usable display engine, and the kernel keeps answering pings while userspace stops making progress. There is no reason to take that risk during an uninstall you are going to reboot from anyway.
 
 ## Community
 
