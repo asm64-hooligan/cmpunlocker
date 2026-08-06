@@ -11,7 +11,7 @@ Below are memory and performance results after applying the unlock:
 
 ### Unlock Results
 
-<img width="777" height="973" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
+<img width="497" height="623" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
 
 ---
 
@@ -35,7 +35,9 @@ sudo ./install.sh
 
 Then perform a cold reboot (full power off, then boot). The correct memory geometry is selected automatically from the PCI device ID (`0x20C2` = 8GB -> 64GB, `0x2082` = 10GB -> 40GB).
 
-### HBM Memory Clock
+### HBM Memory overclock
+<details>
+<summary> HBM Memory overclock </summary>
 
 `--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N * 27` MHz. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB).
 
@@ -58,8 +60,12 @@ Without the flag the overclock is compiled out entirely. The multiplier is compi
 
 If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `./remove.sh`) from a working state.
 
+</details>
+
 ### IOMMU
 
+<details> 
+<summary> IOMMU </summary>
 NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. The installer does **not** touch the kernel command line by default:
 
 ```bash
@@ -68,6 +74,52 @@ sudo ./install.sh --iommu
 
 Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
 
+</details>
+
+### Surviving Kernel Updates (Anti-rollback)
+
+<details> 
+<summary> Surviving Kernel Updates </summary>
+
+The patched modules are built against one specific kernel. Without help, the first kernel update leaves the card on the stock driver — reporting 8GB instead of 64GB — or on nouveau. The installer wires the rebuild into the kernel update path by default, so this does not happen.
+
+A new kernel triggers a rebuild through the package manager hook for your distro, **before** you reboot:
+
+| Distro | Hook |
+|---|---|
+| Fedora, RHEL, openSUSE | `/etc/kernel/install.d/95-cmpunlocker.install` |
+| Debian, Ubuntu, HiveOS | `/etc/kernel/postinst.d/cmpunlocker` |
+| Arch | `/etc/pacman.d/hooks/95-cmpunlocker.hook` |
+
+`cmpunlocker-rebuild.service` is the safety net for what hooks cannot see — a hand-built kernel, a restored snapshot, or a hook that ran before the kernel headers were unpacked. It holds the boot until the patched modules exist, because a rig that silently comes up at 8GB is worse than one slow boot. It gives up after three consecutive failures rather than delaying every boot forever.
+
+Two more things keep the stock driver from winning:
+
+- `/etc/depmod.d/cmpunlocker.conf` makes the patched modules outrank the stock ones. The distro driver is rebuilt on every kernel update too, into `extra/` (akmod) or `updates/dkms/` (dkms), right next to ours.
+- `nvidia-fallback.service` is masked and nouveau is blacklisted, so a driver that fails to load does not hand the card to nouveau.
+
+**The NVIDIA packages are pinned to their installed version.** A driver upgrade past the versions in `driver/VERSION` makes every later rebuild fail, which is the rollback this is meant to prevent. This covers the GSP firmware the driver actually loads, from `/lib/firmware/nvidia/<driver-version>/`, which ships in the driver package itself.
+
+GPU *firmware* packages (`nvidia-gpu-firmware` and friends) are deliberately left unpinned — they belong to `linux-firmware`, and holding them back can wedge system upgrades on a dependency conflict. They are also no longer able to affect the unlock: the optional Booter payload override is read from `/var/lib/cmpunlocker/dmem.bin` rather than from `/lib/firmware/nvidia/ga100/gsp/`, a directory that firmware updates add files to and that no amount of pinning could safely protect.
+
+```bash
+sudo ./install.sh --no-pin       # allow driver upgrades, accept the risk
+sudo ./install.sh --no-persist   # manage rebuilds yourself
+```
+
+Checking on it:
+
+```bash
+systemctl status cmpunlocker-rebuild
+sudo /usr/lib/cmpunlocker/pin-packages.sh status
+cat /var/log/cmpunlocker/rebuild-$(uname -r).log
+sudo /usr/lib/cmpunlocker/rebuild.sh          # rebuild for the running kernel by hand
+```
+
+To take a pinned driver upgrade: `sudo /usr/lib/cmpunlocker/pin-packages.sh unpin`, upgrade, then re-run `install.sh` (which re-pins). If the new driver version is not in `driver/VERSION`, the build will refuse it.
+
+Everything above is undone by `./remove.sh --yes`.
+</details> 
 ---
 
 ## Verify
@@ -109,14 +161,14 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 
 ## What Gets Unlocked
 
-| Feature                                                 | Status          |
-|---------------------------------------------------------|-----------------|
-| Full SM compute throughput (SS0/SS1)                    | Working         |
-| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working         |
-| PCIe Gen 2 speeds                                       | Working         |
-| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)           | Opt-in, `--p2p` |
-| HBM2e memory overclock/downclock                        | Working         |
-| Persistence across reboot (patched modules)             | Working         |
+| Feature                                                          | Status      |
+|------------------------------------------------------------------|-------------|
+| Full SM compute throughput (SS0/SS1)                             | Working     |
+| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards)          | Working     |
+| PCIe Gen 2 speeds                                                | Working     |
+| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress |
+| HBM2e memory overclock/downclock                                 | Working     |
+| Persistence across kernel updates (auto-rebuild) (anti-rollback) | Working     |
 
 ---
 
@@ -136,6 +188,10 @@ sudo ./remove.sh --yes
 ```
 
 Then perform a cold reboot (full power off, then boot).
+
+This removes the patched modules from disk, undoes the kernel-update hooks, releases the package pin, and rebuilds the initramfs. The driver already running in memory is left alone — the card comes up on the stock driver at the next boot, which is the safe order.
+
+`--reload` swaps the running driver for the stock one immediately instead of waiting for the reboot. It is off by default because loading the stock `nvidia-drm` against a CMP 170HX can wedge the machine: the card has no usable display engine, and the kernel keeps answering pings while userspace stops making progress. There is no reason to take that risk during an uninstall you are going to reboot from anyway.
 
 ## Community
 

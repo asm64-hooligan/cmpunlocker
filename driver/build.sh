@@ -12,7 +12,13 @@ SRC_NAME="open-gpu-kernel-modules-${VERSION}"
 SRC_DIR="${BUILD_ROOT}/${SRC_NAME}"
 TARBALL="${BUILD_ROOT}/${SRC_NAME}.tar.gz"
 TARBALL_URL="https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/${VERSION}.tar.gz"
-KVER="$(uname -r)"
+#
+# CMPUNLOCKER_KVER lets the kernel-update hooks build for a kernel that is not
+# the running one: dnf/apt unpack the new modules tree before the reboot, so
+# the patched driver is already in place the first time that kernel boots.
+#
+KVER="${CMPUNLOCKER_KVER:-$(uname -r)}"
+KRUNNING="$(uname -r)"
 KSRC="/lib/modules/${KVER}/build"
 INSTALL_MOD_DIR="/lib/modules/${KVER}/updates/cmpunlocker"
 
@@ -309,6 +315,20 @@ rebuild_initramfs() {
 }
 
 rebuild_initramfs || true
+
+#
+# Building for a kernel that is not running (kernel-update hook): the modules
+# are in place for the next boot and there is nothing to swap in now. Trying to
+# would unload the driver the current kernel is using and load nothing back.
+#
+if [[ "${KVER}" != "${KRUNNING}" ]]; then
+    echo ""
+    ok "Built and installed for kernel ${KVER} (running: ${KRUNNING})"
+    info "Takes effect when ${KVER} boots"
+    echo ""
+    exit 0
+fi
+
 resolved="$(modprobe -n -v nvidia 2>/dev/null | awk '/insmod/ {print $2; exit}' || true)"
 if [[ -n "${resolved}" ]]; then
     info "modprobe will load: ${resolved}"
