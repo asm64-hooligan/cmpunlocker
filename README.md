@@ -10,8 +10,8 @@ Unlock tool for the NVIDIA CMP 170HX (GA100). Restores full SM compute, unlocked
 Below are memory and performance results after applying the unlock:
 
 ### Unlock Results
+<img width="527" height="686" alt="image" src="https://github.com/user-attachments/assets/3f02bf00-7362-4486-bd6d-9f0063fc383c" />
 
-<img width="497" height="623" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
 
 ---
 
