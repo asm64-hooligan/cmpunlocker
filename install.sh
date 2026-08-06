@@ -8,7 +8,7 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 
-CONFIGURE_IOMMU=0
+CONFIGURE_IOMMU=1
 MCLK_NDIV=""
 MCLK_TIMINGS=""
 ENABLE_P2P=""
@@ -17,7 +17,7 @@ PIN_PACKAGES=1
 VERBOSE=0
 for arg in "$@"; do
     case "${arg}" in
-        --iommu) CONFIGURE_IOMMU=1 ;;
+        --no-iommu) CONFIGURE_IOMMU=0 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
         --p2p) ENABLE_P2P=1 ;;
@@ -26,10 +26,13 @@ for arg in "$@"; do
         -v|--verbose) VERBOSE=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--iommu] [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
-                         [--no-persist] [--no-pin] [-v]
+Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
+                         [--no-iommu] [--no-persist] [--no-pin] [-v]
 
-  --iommu         Add iommu=pt to the kernel command line (see README for details)
+  --no-iommu      Do not add iommu=pt to the kernel command line. IOMMU
+                  passthrough is enabled by default — it has negligible overhead
+                  and is required for VM passthrough. Use this flag only if your
+                  system has BIOS/firmware IOMMU bugs.
   -v, --verbose   Show the full build output instead of a progress bar. The
                   build log is kept either way, and is printed automatically
                   if something fails.
@@ -443,9 +446,10 @@ else
     fi
 fi
 
-step "Configuring IOMMU (passthrough)"
-IOMMU_STATUS="skipped"
-IOMMU_PARAMS=""
+step "Configuring kernel command line"
+CMDLINE_STATUS="skipped"
+CMDLINE_ADD=""
+CMDLINE_STRIP_PATS=()
 
 iommu_params_for_cpu() {
     local vendor=""
@@ -457,22 +461,47 @@ iommu_params_for_cpu() {
     esac
 }
 
+# BAR1 resize: always add PCIe params for large BAR support.
+# Without these the kernel cannot allocate a 64 GB MMIO window and the
+# resize silently falls back to 64 MB.
+CMDLINE_ADD="pci=realloc pci=hpmmioprefsize=2T"
+CMDLINE_STRIP_PATS+=("pci=realloc" "pci=hpmmioprefsize=*")
+info "BAR1 resize: pci=realloc pci=hpmmioprefsize=2T"
+
+# IOMMU: add if requested
+if (( CONFIGURE_IOMMU )); then
+    IOMMU_PARAMS="$(iommu_params_for_cpu)"
+    if [[ -n "${IOMMU_PARAMS}" ]]; then
+        CMDLINE_ADD="${IOMMU_PARAMS} ${CMDLINE_ADD}"
+        CMDLINE_STRIP_PATS+=("intel_iommu=*" "amd_iommu=*" "iommu=*")
+        info "IOMMU: ${IOMMU_PARAMS}"
+    else
+        warn "Unrecognized CPU vendor — cannot pick IOMMU kernel parameters"
+    fi
+else
+    info "IOMMU: skipped (--no-iommu)"
+fi
+
 cmdline_merge() {
     local current="$1"
-    local token out=()
+    local token pat skip out=()
     for token in ${current}; do
-        case "${token}" in
-            intel_iommu=*|amd_iommu=*|iommu=*) continue ;;
-            *) out+=("${token}") ;;
-        esac
+        skip=0
+        # CMDLINE_STRIP_PATS is a bash array of glob patterns; we iterate
+        # instead of using case…|… because | inside a variable is literal.
+        for pat in "${CMDLINE_STRIP_PATS[@]}"; do
+            # shellcheck disable=SC2254
+            case "${token}" in ${pat}) skip=1; break ;; esac
+        done
+        (( skip )) || out+=("${token}")
     done
-    for token in ${IOMMU_PARAMS}; do
+    for token in ${CMDLINE_ADD}; do
         out+=("${token}")
     done
     echo "${out[*]}"
 }
 
-configure_iommu_grub() {
+configure_cmdline_grub() {
     local grub_file="/etc/default/grub"
     local key="GRUB_CMDLINE_LINUX_DEFAULT"
     local current merged
@@ -486,8 +515,8 @@ configure_iommu_grub() {
     merged="$(cmdline_merge "${current}")"
 
     if [[ "${current}" == "${merged}" ]]; then
-        ok "GRUB already has ${IOMMU_PARAMS} (${key})"
-        IOMMU_STATUS="already-set"
+        ok "GRUB already has ${CMDLINE_ADD} (${key})"
+        CMDLINE_STATUS="already-set"
         return 0
     fi
 
@@ -524,14 +553,14 @@ configure_iommu_grub() {
         grub-mkconfig -o /boot/grub/grub.cfg || regen_ok=0
     else
         warn "No grub config generator found — regenerate grub.cfg manually"
-        IOMMU_STATUS="needs-grub-regen"
+        CMDLINE_STATUS="needs-grub-regen"
         return 0
     fi
 
     if (( regen_ok == 0 )); then
         warn "Could not regenerate grub.cfg — ${grub_file} is staged but inactive"
         warn "Regenerate it yourself, or restore ${grub_file}.cmpunlocker.bak"
-        IOMMU_STATUS="needs-grub-regen"
+        CMDLINE_STATUS="needs-grub-regen"
         return 0
     fi
     ok "Regenerated GRUB config"
@@ -542,26 +571,26 @@ configure_iommu_grub() {
     # parameters up. grubby patches the existing entries.
     #
     if [[ -d /boot/loader/entries ]] && command -v grubby &>/dev/null; then
-        if grubby --update-kernel=ALL --args="${IOMMU_PARAMS}"; then
+        if grubby --update-kernel=ALL --args="${CMDLINE_ADD}"; then
             ok "Updated existing boot entries via grubby"
         else
-            warn "grubby could not update existing boot entries — only new kernels get ${IOMMU_PARAMS}"
-            IOMMU_STATUS="needs-grub-regen"
+            warn "grubby could not update existing boot entries — only new kernels get ${CMDLINE_ADD}"
+            CMDLINE_STATUS="needs-grub-regen"
             return 0
         fi
     fi
-    IOMMU_STATUS="configured"
+    CMDLINE_STATUS="configured"
 }
 
-configure_iommu_kernel_cmdline() {
+configure_cmdline_kernel() {
     local file="/etc/kernel/cmdline"
     local current merged
     current="$(tr -d '\n' < "${file}")"
     merged="$(cmdline_merge "${current}")"
 
     if [[ "${current}" == "${merged}" ]]; then
-        ok "${file} already has ${IOMMU_PARAMS}"
-        IOMMU_STATUS="already-set"
+        ok "${file} already has ${CMDLINE_ADD}"
+        CMDLINE_STATUS="already-set"
         return 0
     fi
 
@@ -576,37 +605,38 @@ configure_iommu_kernel_cmdline() {
             kernel-install add "${kver}" "${kdir}/vmlinuz" 2>/dev/null || true
         done
         ok "Refreshed systemd-boot entries"
-        IOMMU_STATUS="configured"
+        CMDLINE_STATUS="configured"
     else
         warn "Update your boot entries so ${file} takes effect"
-        IOMMU_STATUS="needs-boot-refresh"
+        CMDLINE_STATUS="needs-boot-refresh"
     fi
 }
 
-if (( CONFIGURE_IOMMU == 0 )); then
-    info "IOMMU: not requested (use --iommu to configure passthrough)"
+if [[ -f /etc/default/grub ]]; then
+    info "Target: ${CMDLINE_ADD} (GRUB)"
+    configure_cmdline_grub
+elif [[ -f /etc/kernel/cmdline ]]; then
+    info "Target: ${CMDLINE_ADD} (systemd-boot)"
+    configure_cmdline_kernel
 else
-    IOMMU_PARAMS="$(iommu_params_for_cpu)"
-    if [[ -z "${IOMMU_PARAMS}" ]]; then
-        warn "Unrecognized CPU vendor — cannot pick IOMMU kernel parameters; skipping"
-    elif [[ -f /etc/default/grub ]]; then
-        info "Target: ${IOMMU_PARAMS} (GRUB)"
-        configure_iommu_grub
-    elif [[ -f /etc/kernel/cmdline ]]; then
-        info "Target: ${IOMMU_PARAMS} (systemd-boot)"
-        configure_iommu_kernel_cmdline
-    else
-        warn "No /etc/default/grub or /etc/kernel/cmdline found"
-        warn "Add these to your kernel command line manually: ${IOMMU_PARAMS}"
-        IOMMU_STATUS="manual"
-    fi
+    warn "No /etc/default/grub or /etc/kernel/cmdline found"
+    warn "Add these to your kernel command line manually: ${CMDLINE_ADD}"
+    CMDLINE_STATUS="manual"
+fi
 
+if (( CONFIGURE_IOMMU )); then
     if grep -qw iommu=pt /proc/cmdline 2>/dev/null && [[ -d /sys/class/iommu ]] && [[ -n "$(ls -A /sys/class/iommu 2>/dev/null)" ]]; then
         ok "IOMMU is already active in passthrough mode on the running kernel"
-    elif [[ "${IOMMU_STATUS}" != "skipped" ]]; then
+    elif [[ "${CMDLINE_STATUS}" != "skipped" ]]; then
         info "IOMMU passthrough takes effect after the next reboot"
         warn "IOMMU must also be enabled in BIOS/UEFI (VT-d / AMD-Vi / SVM)"
     fi
+fi
+
+if grep -qw pci=realloc /proc/cmdline 2>/dev/null; then
+    ok "pci=realloc is already active on the running kernel"
+else
+    info "BAR1 resize parameters take effect after the next reboot"
 fi
 
 echo ""
@@ -646,9 +676,8 @@ echo "Next:"
 echo -e "  1. Cold reboot: ${CYAN}sudo shutdown -h now${NC}  (then power on)"
 echo -e "  2. Benchmark: ${CYAN}./benchmark/nvidia_bench${NC}"
 echo -e "  3. Unlock logs: ${CYAN}sudo dmesg | grep CMPUNLOCK${NC}"
-if [[ -n "${IOMMU_PARAMS}" && "${IOMMU_STATUS}" != "skipped" ]]; then
-    echo -e "  4. Verify IOMMU: ${CYAN}cat /proc/cmdline${NC}"
-fi
+echo -e "  4. Verify cmdline: ${CYAN}cat /proc/cmdline${NC}  (pci=realloc should be present)"
+echo -e "  5. Verify BAR1: ${CYAN}sudo dmesg | grep 'CMP BAR1'${NC}"
 echo ""
 echo "Log: ${LOG_FILE}"
 echo ""
