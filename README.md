@@ -10,8 +10,8 @@ Unlock tool for the NVIDIA CMP 170HX (GA100). Restores full SM compute, unlocked
 Below are memory and performance results after applying the unlock:
 
 ### Unlock Results
+<img width="527" height="686" alt="image" src="https://github.com/user-attachments/assets/3f02bf00-7362-4486-bd6d-9f0063fc383c" />
 
-<img width="497" height="623" alt="image" src="https://github.com/user-attachments/assets/026c767e-66dc-46e9-bbfa-14b1f445f146" />
 
 ---
 
@@ -66,13 +66,13 @@ If a value turns out to be unstable - reinstall without `--mclk-ndiv` (or run `.
 
 <details> 
 <summary> IOMMU </summary>
-NVIDIA recommends `iommu=pt` (passthrough) for all GPUs. The installer does **not** touch the kernel command line by default:
+The installer adds `iommu=pt` (passthrough) to the kernel command line by default — it has negligible overhead and is required for VM passthrough. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
+
+To skip IOMMU configuration:
 
 ```bash
-sudo ./install.sh --iommu
+sudo ./install.sh --no-iommu
 ```
-
-Or add `iommu=pt` to your kernel cmdline manually. IOMMU must also be enabled in BIOS (VT-d on Intel, AMD-Vi / SVM on AMD).
 
 </details>
 
@@ -169,6 +169,7 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress |
 | HBM2e memory overclock/downclock                                 | Working     |
 | Persistence across kernel updates (auto-rebuild) (anti-rollback) | Working     |
+| BAR1 64mb->64gb (requires Above 4G Decoding in BIOS)             | Working     |
 
 ---
 
