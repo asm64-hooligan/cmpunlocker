@@ -753,6 +753,22 @@ cmpUnlockFixStaticInfo(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 
     NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: static-info AFTER: fb_length=0x%llx last_limit=0x%llx\n",
               pGSCI->fb_length, pLastRegion->limit);
+
+    /* Override the GPU name string.
+     * GSP firmware reports "NVIDIA Graphics Device" for CMP SKUs.
+     * Set a proper product name with the unlocked memory capacity. */
+    {
+        NvU32 devId = pGpu->idInfo.PCIDeviceID >> 16;
+        const char *name = (devId == CMPUNLOCK_DEVID_8GB)
+            ? "NVIDIA CMP 170HX 64GB"
+            : "NVIDIA CMP 170HX 40GB";
+
+        portMemSet(pGSCI->gpuNameString, 0, sizeof(pGSCI->gpuNameString));
+        portMemCopy(pGSCI->gpuNameString, sizeof(pGSCI->gpuNameString),
+                    name, portStringLength(name) + 1);
+
+        NV_PRINTF(LEVEL_WARNING, "CMPUNLOCK: GPU name -> \"%s\"\n", name);
+    }
 }
 
 /* -------------------------------------------------------------------------
