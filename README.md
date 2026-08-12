@@ -161,15 +161,16 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 
 ## What Gets Unlocked
 
-| Feature                                                          | Status      |
-|------------------------------------------------------------------|-------------|
-| Full SM compute throughput (SS0/SS1)                             | Working     |
-| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards)          | Working     |
-| PCIe Gen 2 speeds                                                | Working     |
-| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress |
-| HBM2e memory overclock/downclock                                 | Working     |
-| Persistence across kernel updates (auto-rebuild) (anti-rollback) | Working     |
-| BAR1 64mb->64gb (requires Above 4G Decoding in BIOS)             | Working     |
+| Feature                                                          | Status       |
+|------------------------------------------------------------------|--------------|
+| Full SM compute throughput (SS0/SS1)                             | ✅            |
+| Memory geometry (64GB on 8GB cards, 40GB on 10GB cards)          | ✅            |
+| PCIe Gen 2 speeds                                                | ✅            |
+| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress  |
+| HBM2e memory overclock/downclock                                 | ✅            |
+| Persistence across kernel updates (auto-rebuild) (anti-rollback) | ✅            |
+| BAR1 64mb->64gb (requires Above 4G Decoding in BIOS)             | ✅            |
+| PMA mem region fix                                               | ✅            |
 
 ---
 
@@ -193,6 +194,14 @@ Then perform a cold reboot (full power off, then boot).
 This removes the patched modules from disk, undoes the kernel-update hooks, releases the package pin, and rebuilds the initramfs. The driver already running in memory is left alone — the card comes up on the stock driver at the next boot, which is the safe order.
 
 `--reload` swaps the running driver for the stock one immediately instead of waiting for the reboot. It is off by default because loading the stock `nvidia-drm` against a CMP 170HX can wedge the machine: the card has no usable display engine, and the kernel keeps answering pings while userspace stops making progress. There is no reason to take that risk during an uninstall you are going to reboot from anyway.
+
+## Credits
+
+| Who                                  | Contribution                                  |
+|--------------------------------------|-----------------------------------------------|
+| [@bayley](https://github.com/bayley) | GPU-to-GPU P2P over BAR1, PMA WPR overlap fix |
+| JP                                   | Extra special thanks                          |
+| Humvee55                             | Extra special thanks                          |
 
 ## Community
 

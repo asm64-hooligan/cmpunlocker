@@ -1191,6 +1191,22 @@ cmpUnlockLateExtendPma(OBJGPU *pGpu)
     if (!cmpUnlockIsTarget(pGpu))
         return NV_OK;
 
+    /*
+     * The candidate region (base=0xff7300000 limit=0xfffffffff, ~141 MB)
+     * overlaps the WPR (Write Protected Region) and the GSP heap.  If PMA
+     * hands out pages from that range, Copy-Engine writes hit a hardware
+     * region-violation fault:
+     *
+     *   Xid 31 "MMU Fault: ENGINE CE2 HUBCLIENT_HSCE2 ...
+     *           FAULT_INFO_TYPE_REGION_VIOLATION ACCESS_TYPE_VIRT_WRITE"
+     *
+     * Cost of skipping: ~141 MB out of 63.5 GiB (0.22 %).
+     */
+    NV_PRINTF(LEVEL_WARNING,
+              "CMPUNLOCK_PMA: extension SKIPPED — "
+              "candidate region overlaps WPR + GSP heap\n");
+    return NV_OK;
+
     pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
     if (pMemoryManager == NULL)
         return NV_ERR_INVALID_ARGUMENT;
