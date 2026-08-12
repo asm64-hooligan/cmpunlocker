@@ -199,9 +199,10 @@ This removes the patched modules from disk, undoes the kernel-update hooks, rele
 
 | Who                                  | Contribution                                  |
 |--------------------------------------|-----------------------------------------------|
-| [@bayley](https://github.com/bayley) | GPU-to-GPU P2P over BAR1, PMA WPR overlap fix |
+| JP                                   | BAR1 64mb --> 64gb                            |
 | JP                                   | Extra special thanks                          |
 | Humvee55                             | Extra special thanks                          |
+| [@bayley](https://github.com/bayley) | GPU-to-GPU P2P over BAR1, PMA WPR overlap fix |
 
 ## Community
 
