@@ -18,6 +18,11 @@
  * (--p2p). Undefined leaves the caps as GSP reported them, which is the safe
  * default: forcing them on a host that cannot carry P2P turns a clean
  * "unsupported" into transfers that time out.
+ *
+ * CMPUNLOCK_DISABLE_GEN2 compiles out the directed PCIe Gen2 speed change
+ * (--no-gen2). Undefined keeps the retrain, which is the default. Define it on
+ * hosts where the link does not train reliably at Gen2: a card that does not
+ * come back from the retrain stays gone until a cold power cycle.
  */
 
 #ifndef CMPUNLOCK_CONFIG_H
@@ -26,5 +31,6 @@
 /* #define CMPUNLOCK_MCLK_NDIV 70 */
 /* #define CMPUNLOCK_MCLK_TIMINGS (20) */
 /* #define CMPUNLOCK_ENABLE_P2P 1 */
+/* #define CMPUNLOCK_DISABLE_GEN2 1 */
 
 #endif /* CMPUNLOCK_CONFIG_H */
