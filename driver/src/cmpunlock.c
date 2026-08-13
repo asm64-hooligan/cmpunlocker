@@ -1207,22 +1207,6 @@ cmpUnlockLateExtendPma(OBJGPU *pGpu)
     if (!cmpUnlockIsTarget(pGpu))
         return NV_OK;
 
-    /*
-     * The candidate region (base=0xff7300000 limit=0xfffffffff, ~141 MB)
-     * overlaps the WPR (Write Protected Region) and the GSP heap.  If PMA
-     * hands out pages from that range, Copy-Engine writes hit a hardware
-     * region-violation fault:
-     *
-     *   Xid 31 "MMU Fault: ENGINE CE2 HUBCLIENT_HSCE2 ...
-     *           FAULT_INFO_TYPE_REGION_VIOLATION ACCESS_TYPE_VIRT_WRITE"
-     *
-     * Cost of skipping: ~141 MB out of 63.5 GiB (0.22 %).
-     */
-    NV_PRINTF(LEVEL_WARNING,
-              "CMPUNLOCK_PMA: extension SKIPPED — "
-              "candidate region overlaps WPR + GSP heap\n");
-    return NV_OK;
-
     pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
     if (pMemoryManager == NULL)
         return NV_ERR_INVALID_ARGUMENT;
@@ -1264,13 +1248,61 @@ cmpUnlockLateExtendPma(OBJGPU *pGpu)
               pMemoryManager->Ram.numFBRegions, numPmaRegions,
               CMP_FB_BYTES_STOCK, pmaTotalBefore, pmaFreeBefore, heapTotal, heapFree);
 
-    /* Find the highest reserved region that reaches past the stock limit. */
+    /*
+     * The region this used to pick is the WPR plus the GSP heap, and its
+     * rsvdSize covers it exactly, so there is no unclaimed memory in it.
+     * Publishing it to PMA does not add capacity, it adds memory the hardware
+     * refuses to let anything write, and the first Copy Engine to touch it
+     * takes the GPU out with a region violation followed by Xid 154
+     * "Node Reboot Required". Originally found by bayley.
+     *
+     * The exact region varies by VBIOS, so this does not hardcode it:
+     *
+     *   92.00.6D.00.0A  region[6] base=0xff7200000 limit=0xfffffffff  142 MiB
+     *                   Xid 31 CE2 HUBCLIENT_HSCE2 @ 0xf_fd200000 PHYS_WRITE
+     *   92.00.67.00.01  region    base=0xff7300000 limit=0xfffffffff  141 MiB
+     *                   Xid 31 CE2 HUBCLIENT_HSCE2            VIRT_WRITE
+     *
+     * The invariant that holds across both is that the region is fully
+     * reserved, so that is what is tested below.
+     *
+     * The unlocked capacity does not come from here. By the time this runs the
+     * public region already spans the framebuffer, so the extension is
+     * vestigial and stays compiled out unless a bench build opts back in.
+     */
+#ifndef CMPUNLOCK_ENABLE_LATE_PMA
+    NV_PRINTF(LEVEL_WARNING,
+              "CMPUNLOCK_PMA: extension compiled out, high FB regions are "
+              "WPR/GSP-owned (CMPUNLOCKER_ENABLE_LATE_PMA=1 re-enables)\n");
+    return NV_OK;
+#endif
+
+    /*
+     * Find the highest reserved region that reaches past the stock limit and
+     * still holds memory nothing else has claimed. A region whose rsvdSize
+     * spans the whole region is entirely spoken for and must never reach PMA,
+     * however high it sits.
+     */
     for (i = 0; i < pMemoryManager->Ram.numFBRegions; i++)
     {
         FB_REGION_DESCRIPTOR *pRegion = &pMemoryManager->Ram.fbRegion[i];
-        if (pRegion->bRsvdRegion && !pRegion->bInternalHeap &&
-            pRegion->limit >= CMP_FB_BYTES_STOCK && pRegion->base <= pRegion->limit &&
-            (pCandidate == NULL || pRegion->limit > pCandidate->limit))
+        NvU64 regionSize;
+
+        if (!pRegion->bRsvdRegion || pRegion->bInternalHeap ||
+            pRegion->limit < CMP_FB_BYTES_STOCK || pRegion->base > pRegion->limit)
+            continue;
+
+        regionSize = pRegion->limit - pRegion->base + 1;
+        if (pRegion->rsvdSize >= regionSize)
+        {
+            NV_PRINTF(LEVEL_ERROR,
+                      "CMPUNLOCK_PMA: skipping region[%u] base=0x%llx limit=0x%llx, "
+                      "fully reserved rsvdSize=0x%llx size=0x%llx\n",
+                      i, pRegion->base, pRegion->limit, pRegion->rsvdSize, regionSize);
+            continue;
+        }
+
+        if (pCandidate == NULL || pRegion->limit > pCandidate->limit)
         {
             pCandidate = pRegion;
             candidateIdx = i;
