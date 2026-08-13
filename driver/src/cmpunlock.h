@@ -102,4 +102,29 @@ NV_STATUS cmpUnlockLateExtendPma(OBJGPU *pGpu);
  */
 void cmpUnlockForceP2PCaps(OBJGPU *pGpu);
 
+/*
+ * Saved state for the temporary trap-31 window used by mailbox P2P setup.
+ * The caller owns one instance per GPU while the corresponding GSP control
+ * is in flight; cmpUnlockP2PTrapRestore() must be called afterward.
+ */
+typedef struct CMPUNLOCK_P2P_TRAP_STATE
+{
+    NvU32  match;
+    NvU32  mask;
+    NvU32  data1;
+    NvU32  data2;
+    NvU32  action;
+    NvU32  cfg;
+    NvBool valid;
+} CMPUNLOCK_P2P_TRAP_STATE;
+
+/*
+ * Arm the trap-31 window around a mailbox setup call. Returns NV_TRUE when it
+ * is safe to proceed, which includes the cases where there is nothing to do:
+ * P2P compiled out, or a GPU this driver does not target. NV_FALSE means this
+ * is a CMP and the window could not be opened, so the setup write would fail.
+ */
+NvBool cmpUnlockP2PTrapArm(OBJGPU *pGpu, CMPUNLOCK_P2P_TRAP_STATE *pState);
+void cmpUnlockP2PTrapRestore(OBJGPU *pGpu, CMPUNLOCK_P2P_TRAP_STATE *pState);
+
 #endif /* CMPUNLOCK_H */

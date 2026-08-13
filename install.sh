@@ -339,13 +339,22 @@ else
 fi
 export CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}"
 
+P2P_MODPROBE_CONF="/etc/modprobe.d/cmpunlocker-p2p.conf"
+P2P_MODPROBE_LINE='options nvidia NVreg_EnableStreamMemOPs=1 NVreg_RegistryDwords="PeerMappingOverride=1;ForceP2P=17;"'
+
 if [[ -n "${ENABLE_P2P}" ]]; then
     ok "GPU-to-GPU P2P forced on"
+    printf '%s\n' "${P2P_MODPROBE_LINE}" > "${P2P_MODPROBE_CONF}"
+    ok "Staged mailbox runtime options in ${P2P_MODPROBE_CONF}"
     warn "This only makes the driver advertise P2P. If the host cannot actually"
     warn "carry it, transfers time out rather than falling back to system memory."
     warn "Verify with a real peer-to-peer copy before relying on it."
 else
     info "P2P left as GSP reports it (use --p2p to force it on)"
+    if [[ -e "${P2P_MODPROBE_CONF}" ]]; then
+        rm -f "${P2P_MODPROBE_CONF}"
+        ok "Removed stale ${P2P_MODPROBE_CONF}"
+    fi
 fi
 export CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}"
 
