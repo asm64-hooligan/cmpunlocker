@@ -43,6 +43,28 @@
 #define CMP_REG_XP_CYA0             0x0008c2c0U
 #define CMP_REG_XVE_LINK_CTRL_STAT  0x00088088U
 
+/*
+ * Mailbox P2P: PPRIV_SYS PRI decode trap 31.
+ *
+ * The mailbox setup RPC writes the P2P aperture registers at a PRI level the
+ * CMP refuses. Trap 31 re-stamps matching writes to a level that is accepted,
+ * for the duration of the setup call only.
+ */
+#define CMP_REG_TRAP31_MATCH         0x0012247cU
+#define CMP_REG_TRAP31_MASK          0x001224fcU
+#define CMP_REG_TRAP31_DATA1         0x0012257cU
+#define CMP_REG_TRAP31_DATA2         0x001225fcU
+#define CMP_REG_TRAP31_ACTION        0x0012267cU
+#define CMP_REG_TRAP31_CFG           0x001226fcU
+#define CMP_REG_TRAP31_PLM           0x0012277cU
+
+/* Match writes from any PRI source at L0/L1/L2 in 0x139000..0x139fff. */
+#define CMP_TRAP31_P2P_MATCH         0x00139000U
+#define CMP_TRAP31_P2P_MASK          0xfc000fffU
+#define CMP_TRAP31_P2P_DATA1         0xc0000000U
+#define CMP_TRAP31_P2P_CFG           0x0001c010U
+#define CMP_TRAP31_SET_PRIV_LEVEL    0x00100000U
+
 /* HBM PLL / FBPA. */
 #define CMP_REG_FBPA_PLL_PLM        0x00903c7cU
 #define CMP_REG_FBPA_PLL_CFG        0x00903c90U
@@ -242,6 +264,108 @@ cmpUnlockForceP2PCaps(OBJGPU *pGpu)
     NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: PCIe P2P caps forced to OK (--p2p)\n");
 #else
     (void)pGpu;
+#endif
+}
+
+/* -------------------------------------------------------------------------
+ * Mailbox P2P: trap-31 window
+ *
+ * Mailbox P2P runs through a 512 KB window inside the stock 64 MB BAR1, so it
+ * needs no BAR1 resize and no Above 4G Decoding. The setup RPC writes the P2P
+ * aperture registers at a PRI level the CMP refuses, so a PRI decode trap is
+ * armed across the call to re-stamp those writes, then restored.
+ * ------------------------------------------------------------------------- */
+
+void
+cmpUnlockP2PTrapRestore
+(
+    OBJGPU *pGpu,
+    CMPUNLOCK_P2P_TRAP_STATE *pState
+)
+{
+#ifdef CMPUNLOCK_ENABLE_P2P
+    if (!cmpUnlockIsTarget(pGpu) || pState == NULL || !pState->valid)
+        return;
+
+    /* Stop acting first, restore the payload, then restore ACTION last. */
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_ACTION, 0);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_CFG,    pState->cfg);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_DATA2,  pState->data2);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_DATA1,  pState->data1);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_MASK,   pState->mask);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_MATCH,  pState->match);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_ACTION, pState->action);
+    pState->valid = NV_FALSE;
+#else
+    (void)pGpu;
+    (void)pState;
+#endif
+}
+
+NvBool
+cmpUnlockP2PTrapArm
+(
+    OBJGPU *pGpu,
+    CMPUNLOCK_P2P_TRAP_STATE *pState
+)
+{
+#ifdef CMPUNLOCK_ENABLE_P2P
+    NvU32 plm;
+    NvBool armed;
+
+    /*
+     * Nothing to do is not a failure. Returning NV_TRUE here keeps mailbox
+     * setup working normally for any GPU this driver does not target.
+     */
+    if (!cmpUnlockIsTarget(pGpu))
+        return NV_TRUE;
+
+    if (pState == NULL)
+        return NV_FALSE;
+
+    pState->match  = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_MATCH);
+    pState->mask   = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_MASK);
+    pState->data1  = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_DATA1);
+    pState->data2  = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_DATA2);
+    pState->action = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_ACTION);
+    pState->cfg    = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_CFG);
+    pState->valid  = NV_TRUE;
+
+    plm = GPU_REG_RD32(pGpu, CMP_REG_TRAP31_PLM);
+    if (plm != 0xffffffffU)
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "CMPUNLOCK: P2P trap31 unavailable gpuId=0x%x PLM=0x%08x\n",
+                  pGpu->gpuId, plm);
+        pState->valid = NV_FALSE;
+        return NV_FALSE;
+    }
+
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_ACTION, 0);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_DATA1, CMP_TRAP31_P2P_DATA1);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_DATA2, 0);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_CFG, CMP_TRAP31_P2P_CFG);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_MATCH, CMP_TRAP31_P2P_MATCH);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_MASK, CMP_TRAP31_P2P_MASK);
+    GPU_REG_WR32(pGpu, CMP_REG_TRAP31_ACTION, CMP_TRAP31_SET_PRIV_LEVEL);
+
+    armed =
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_MATCH) == CMP_TRAP31_P2P_MATCH &&
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_MASK) == CMP_TRAP31_P2P_MASK &&
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_DATA1) == CMP_TRAP31_P2P_DATA1 &&
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_DATA2) == 0 &&
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_CFG) == CMP_TRAP31_P2P_CFG &&
+        GPU_REG_RD32(pGpu, CMP_REG_TRAP31_ACTION) == CMP_TRAP31_SET_PRIV_LEVEL;
+
+    if (!armed)
+        cmpUnlockP2PTrapRestore(pGpu, pState);
+
+    return armed;
+#else
+    /* P2P compiled out: leave mailbox setup exactly as the stock driver does. */
+    (void)pGpu;
+    (void)pState;
+    return NV_TRUE;
 #endif
 }
 
@@ -489,6 +613,9 @@ static const struct
     { 0x009a0168U, 0xffffffffU, 0x000000ffU, "FBPA_MEM"     },
     { 0x001fa7c4U, 0xffffffffU, 0xffffffffU, "WPR"          },
     { 0x00823804U, 0xffffffffU, 0xffffffffU, "FEAT"         },
+#ifdef CMPUNLOCK_ENABLE_P2P
+    { CMP_REG_TRAP31_PLM, 0xffffffffU, 0xffffffffU, "TRAP31"    },
+#endif
     { 0x00088ff4U, 0xffffffffU, 0xffffffffU, "XVE"          },
     { 0x00088ab4U, 0xffffffffU, 0xffffffffU, "XVE_B"        },
     { 0x00088ff8U, 0xffffffffU, 0xffffffffU, "XVE_C"        },
