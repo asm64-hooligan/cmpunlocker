@@ -12,6 +12,7 @@ CONFIGURE_IOMMU=1
 MCLK_NDIV=""
 MCLK_TIMINGS=""
 ENABLE_P2P=""
+DISABLE_GEN2=""
 INSTALL_PERSIST=1
 PIN_PACKAGES=1
 VERBOSE=0
@@ -21,12 +22,13 @@ for arg in "$@"; do
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
         --p2p) ENABLE_P2P=1 ;;
+        --no-gen2) DISABLE_GEN2=1 ;;
         --no-persist) INSTALL_PERSIST=0 ;;
         --no-pin) PIN_PACKAGES=0 ;;
         -v|--verbose) VERBOSE=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--p2p]
+Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [--no-gen2]
                          [--no-iommu] [--no-persist] [--no-pin] [-v]
 
   --no-iommu      Do not add iommu=pt to the kernel command line. IOMMU
@@ -348,6 +350,7 @@ else
     info "P2P left as GSP reports it (use --p2p to force it on)"
 fi
 export CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}"
+export CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}"
 
 step "Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
 [[ ${#SUPPORTED_VERSIONS[@]} -gt 0 ]] || die "No supported versions listed in driver/VERSION"
@@ -405,6 +408,7 @@ CMPUNLOCKER_DRIVER_VERSION="${detected}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
 CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
 CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
+CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}" \
 CMPUNLOCKER_VERBOSE="${VERBOSE}" \
     "${SCRIPT_DIR}/driver/build.sh" || {
     #
@@ -436,6 +440,7 @@ else
        CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
        CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
        CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
+       CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}" \
        CMPUNLOCKER_PIN_PACKAGES="${PIN_PACKAGES}" \
            "${SCRIPT_DIR}/persist/install-persist.sh"; then
         PERSIST_STATUS="installed"

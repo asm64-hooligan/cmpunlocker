@@ -19,6 +19,10 @@
  * default: forcing them on a host that cannot carry P2P turns a clean
  * "unsupported" into transfers that time out.
  *
+ * CMPUNLOCK_DISABLE_GEN2 compiles out the directed PCIe Gen2 speed change
+ * (--no-gen2). Undefined keeps the retrain, which is the default. Define it on
+ * hosts where the link does not train reliably at Gen2: a card that does not
+ * come back from the retrain stays gone until a cold power cycle.
  * CMPUNLOCK_ENABLE_LATE_PMA compiles in the late PMA extension, which offers
  * the highest reserved FB region to PMA after init. On this hardware that
  * region is WPR plus GSP heap and is reserved end to end, so publishing it
@@ -33,6 +37,7 @@
 /* #define CMPUNLOCK_MCLK_NDIV 70 */
 /* #define CMPUNLOCK_MCLK_TIMINGS (20) */
 /* #define CMPUNLOCK_ENABLE_P2P 1 */
+/* #define CMPUNLOCK_DISABLE_GEN2 1 */
 /* #define CMPUNLOCK_ENABLE_LATE_PMA 1 */
 
 #endif /* CMPUNLOCK_CONFIG_H */

@@ -554,7 +554,13 @@ _cmpOpenPlmGates(OBJGPU *pGpu, KernelGsp *pKernelGsp, NvU32 wpr2Lo, NvU32 wpr2Hi
 /*
  * Ask the link to retrain at Gen2. The PLM gates guarding the XP registers
  * were opened by _cmpOpenPlmGates(), so these writes stick.
+ *
+ * Compiled out by CMPUNLOCK_DISABLE_GEN2 for hosts where the directed speed
+ * change is not safe. Not every board trains reliably at Gen2, and a card that
+ * fails to come back from the retrain is lost until a cold power cycle, so
+ * there needs to be a way to leave the link where firmware put it.
  */
+#ifndef CMPUNLOCK_DISABLE_GEN2
 static void
 _cmpRetrainGen2(OBJGPU *pGpu)
 {
@@ -622,6 +628,7 @@ _cmpRetrainGen2(OBJGPU *pGpu)
               (linkCtrlStat >> 16) & 0xFU,
               (linkCtrlStat >> 20) & 0x3FU);
 }
+#endif /* CMPUNLOCK_DISABLE_GEN2 */
 
 /* -------------------------------------------------------------------------
  * The unlock
@@ -681,7 +688,11 @@ cmpUnlockPreBoot(OBJGPU *pGpu, KernelGsp *pKernelGsp, GSP_FIRMWARE *pGspFw)
               GPU_REG_RD32(pGpu, CMP_REG_MMU_LMR),
               devId);
 
+#ifndef CMPUNLOCK_DISABLE_GEN2
     _cmpRetrainGen2(pGpu);
+#else
+    NV_PRINTF(LEVEL_ERROR, "CMPUNLOCK: PCIe Gen2 disabled at build time\n");
+#endif
 
     /* Put the real signature back before GSP boots. */
     status = _cmpRebuildStockSignature(pGpu, pKernelGsp);
