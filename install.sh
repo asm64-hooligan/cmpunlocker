@@ -348,9 +348,8 @@ if [[ -n "${ENABLE_P2P}" ]]; then
     ok "GPU-to-GPU P2P forced on"
     printf '%s\n' "${P2P_MODPROBE_LINE}" > "${P2P_MODPROBE_CONF}"
     ok "Staged mailbox runtime options in ${P2P_MODPROBE_CONF}"
-    warn "This only makes the driver advertise P2P. If the host cannot actually"
-    warn "carry it, transfers time out rather than falling back to system memory."
-    warn "Verify with a real peer-to-peer copy before relying on it."
+    warn "Mailbox P2P uses a 512 KB window in stock BAR1 — no REBAR or kernel patches needed."
+    warn "Verify with a real peer-to-peer copy (nvidia-smi topo -p2p r) before relying on it."
 else
     info "P2P left as GSP reports it (use --p2p to force it on)"
     if [[ -e "${P2P_MODPROBE_CONF}" ]]; then

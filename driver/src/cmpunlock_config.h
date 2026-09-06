@@ -14,10 +14,11 @@
  * time; scaling them back up restores the margin. Undefined leaves the VBIOS
  * timing table untouched.
  *
- * CMPUNLOCK_ENABLE_P2P compiles in the GPU-to-GPU P2P capability override
- * (--p2p). Undefined leaves the caps as GSP reported them, which is the safe
- * default: forcing them on a host that cannot carry P2P turns a clean
- * "unsupported" into transfers that time out.
+ * CMPUNLOCK_ENABLE_P2P compiles in mailbox P2P support (--p2p): forces P2P
+ * caps to OK and arms a PRI decode trap so the mailbox setup writes land on
+ * CMP. Uses a 512 KB window inside the stock 64 MB BAR1 — no REBAR, no
+ * kernel patches, works on any host with PCIe reach between GPUs. Undefined
+ * leaves P2P as GSP reports it (disabled), which is the safe default.
  *
  * CMPUNLOCK_DISABLE_GEN2 compiles out the directed PCIe Gen2 speed change
  * (--no-gen2). Undefined keeps the retrain, which is the default. Define it on

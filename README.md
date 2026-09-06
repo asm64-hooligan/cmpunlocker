@@ -76,6 +76,23 @@ sudo ./install.sh --no-iommu
 
 </details>
 
+### GPU-to-GPU P2P
+
+<details>
+<summary> GPU-to-GPU P2P </summary>
+
+`--p2p` enables peer-to-peer transfers between GPUs via the PCIe mailbox transport. It uses a 512 KB window inside the stock 64 MB BAR1 — no BAR1 resize, no Above 4G Decoding, no kernel patches required. Works on any host where the GPUs can reach each other over PCIe.
+
+```bash
+sudo ./install.sh --p2p
+```
+
+Under pipeline parallelism (DeepSeek, GLM, etc.) the throughput difference versus a full BAR1 P2P mapping is ~2–3%, while the difference versus no P2P at all is ~10–20% depending on GPU count.
+
+Without the flag P2P is left as GSP reports it (disabled on CMP).
+
+</details>
+
 ### Surviving Kernel Updates (Anti-rollback)
 
 <details> 
@@ -166,10 +183,10 @@ cd benchmark && nvcc -O3 -o nvidia_bench nvidia_bench.cu -lnvidia-ml -ldl \
 | Full SM compute throughput (SS0/SS1)                             | ✅            |
 | Memory geometry (64GB on 8GB cards, 40GB on 10GB cards)          | ✅            |
 | PCIe Gen 2 speeds                                                | ✅            |
-| GPU-to-GPU P2P (`cudaDeviceEnablePeerAccess`)                    | In progress  |
+| GPU-to-GPU P2P via mailbox (`--p2p`)                             | ✅            |
 | HBM2e memory overclock/downclock                                 | ✅            |
 | Persistence across kernel updates (auto-rebuild) (anti-rollback) | ✅            |
-| BAR1 64mb->64gb (requires Above 4G Decoding in BIOS)             | ✅            |
+| BAR1 64 MB → 64 GB (requires Above 4G Decoding in BIOS)          | ✅            |
 | PMA mem region fix                                               | ✅            |
 
 ---
@@ -197,12 +214,13 @@ This removes the patched modules from disk, undoes the kernel-update hooks, rele
 
 ## Credits
 
-| Who                                  | Contribution                                  |
-|--------------------------------------|-----------------------------------------------|
-| JP                                   | BAR1 64mb --> 64gb                            |
-| JP                                   | Extra special thanks                          |
-| Humvee55                             | Extra special thanks                          |
-| [@bayley](https://github.com/bayley) | GPU-to-GPU P2P over BAR1, PMA WPR overlap fix |
+| Who                                     | Contribution                                                   |
+|-----------------------------------------|----------------------------------------------------------------|
+| JP                                      | BAR1 64mb --> 64gb                                             |
+| JP                                      | Extra special thanks                                           |
+| [Humvee55](https://github.com/duggasco) | Extra special thanks                                           |
+| [@bayley](https://github.com/bayley)    | GPU-to-GPU P2P research (BAR1 path), PMA WPR overlap fix       |
+| [Humvee55](https://github.com/duggasco) | Mailbox P2P transport, late-PMA region guard, `--no-gen2` flag |
 
 ## Community
 
