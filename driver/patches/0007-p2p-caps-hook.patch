@@ -17,3 +17,60 @@ diff --git a/src/nvidia/src/kernel/gpu/gpu.c b/src/nvidia/src/kernel/gpu/gpu.c
  }
 
  static void
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm200.c b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm200.c
+--- a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm200.c	2026-08-13 17:39:22.986191102 +0000
++++ b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm200.c	2026-08-13 17:40:27.490749758 +0000
+@@ -28,6 +28,7 @@
+ #include "gpu/gpu.h"
+ #include "gpu/bus/kern_bus.h"
+ #include "gpu/bus/p2p_api.h"
++#include "gpu/cmpunlock/cmpunlock.h"
+ #include "gpu/bif/kernel_bif.h"
+ 
+ #include "published/maxwell/gm200/dev_nv_p2p.h"
+@@ -71,6 +72,8 @@
+     RM_API *pRmApi1     = GPU_GET_PHYSICAL_RMAPI(pGpu1);
+     NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_LOCAL_PARAMS  params0 = {0};
+     NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_REMOTE_PARAMS params1 = {0};
++    CMPUNLOCK_P2P_TRAP_STATE localTrapState = {0};
++    CMPUNLOCK_P2P_TRAP_STATE remoteTrapState = {0};
+     NV_STATUS status;
+ 
+     NV_ASSERT_OR_RETURN_VOID(local2Remote < P2P_MAX_NUM_PEERS);
+@@ -113,6 +116,7 @@
+     NV_ASSERT((remoteWMBoxAddrU64 & 0xFFFF) == 0);
+ 
+     // Setup PCIE P2P Mailbox on local GPU
++    NV_ASSERT_OR_RETURN_VOID(cmpUnlockP2PTrapArm(pGpu0, &localTrapState));
+     params0.local2Remote                = local2Remote;
+     params0.remote2Local                = remote2Local;
+     params0.localP2PDomainRemoteAddr    = localP2PDomainRemoteAddr;
+@@ -127,9 +131,11 @@
+                               NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_LOCAL,
+                               &params0,
+                               sizeof(NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_LOCAL_PARAMS));
+-    NV_ASSERT(status == NV_OK);
++    cmpUnlockP2PTrapRestore(pGpu0, &localTrapState);
++    NV_ASSERT_OR_RETURN_VOID(status == NV_OK);
+ 
+     // Setup PCIE P2P Mailbox on remote GPU
++    NV_ASSERT_OR_RETURN_VOID(cmpUnlockP2PTrapArm(pGpu1, &remoteTrapState));
+     params1.local2Remote                = local2Remote;
+     params1.remote2Local                = remote2Local;
+     params1.localP2PDomainRemoteAddr    = localP2PDomainRemoteAddr;
+@@ -143,9 +149,14 @@
+                               NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_REMOTE,
+                               &params1,
+                               sizeof(NV2080_CTRL_CMD_INTERNAL_BUS_SETUP_P2P_MAILBOX_REMOTE_PARAMS));
+-    NV_ASSERT(status == NV_OK);
++    if (status != NV_OK)
++    {
++        cmpUnlockP2PTrapRestore(pGpu1, &remoteTrapState);
++        NV_ASSERT_OR_RETURN_VOID(status == NV_OK);
++    }
+ 
+     kbusWriteP2PWmbTag_HAL(pGpu1, pKernelBus1, remote2Local, params0.p2pWmbTag);
++    cmpUnlockP2PTrapRestore(pGpu1, &remoteTrapState);
+ }
+ 
+ void
