@@ -18,6 +18,13 @@
  * (--p2p). Undefined leaves the caps as GSP reported them, which is the safe
  * default: forcing them on a host that cannot carry P2P turns a clean
  * "unsupported" into transfers that time out.
+ *
+ * CMPUNLOCK_ENABLE_LATE_PMA compiles in the late PMA extension, which offers
+ * the highest reserved FB region to PMA after init. On this hardware that
+ * region is WPR plus GSP heap and is reserved end to end, so publishing it
+ * yields no capacity and eventually faults the GPU with an Xid 31 region
+ * violation followed by Xid 154. Undefined skips the extension, which is the
+ * safe default; the unlocked capacity does not depend on it.
  */
 
 #ifndef CMPUNLOCK_CONFIG_H
@@ -26,5 +33,6 @@
 /* #define CMPUNLOCK_MCLK_NDIV 70 */
 /* #define CMPUNLOCK_MCLK_TIMINGS (20) */
 /* #define CMPUNLOCK_ENABLE_P2P 1 */
+/* #define CMPUNLOCK_ENABLE_LATE_PMA 1 */
 
 #endif /* CMPUNLOCK_CONFIG_H */
