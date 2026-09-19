@@ -43,7 +43,7 @@ def fnum(x):
 
 
 # ----------------------------------------------------------------------------------------------- worker (one per GPU)
-def worker(gpu, a, q):
+def worker(gpu, a, q, throttle, stop):
     import torch
     res = {"gpu": gpu, "pattern_errors": 0, "hammer_errors": 0, "gemm_mismatch": 0, "ref_mismatch": 0, "examples": [],
            "chunks": 0, "gib": 0.0, "rotations": 0, "copy_gbps": None, "gemm_runs": 0, "gemm_sha": {}, "injected_caught": {},
@@ -147,8 +147,14 @@ def worker(gpu, a, q):
                     pass                                                # counted by the exact compare below
                 elif bad:
                     res["hammer_errors"] += bad
-            if time.time() >= t_end:
+            if time.time() >= t_end or stop.is_set():
+                res["stopped_early"] = stop.is_set()
                 break
+            thr = min(0.9, max(0.0, throttle.value))                 # the parent raises this when THIS card gets too hot
+            if thr > 0:
+                busy = time.time() - t0
+                res["throttled_s"] = res.get("throttled_s", 0.0) + busy * thr / (1.0 - thr)
+                time.sleep(busy * thr / (1.0 - thr))
         res["copy_gbps"] = round(copied / t_copy / 1e9, 1) if t_copy else None
         res["phase"] = "final-compare"
         mats.clear(); del x, y, first; torch.cuda.empty_cache()
@@ -176,6 +182,8 @@ def main():
     ap.add_argument("--json", help="also write the result document here"); ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--max-hbm-c", type=float, default=88.0, help="stop the run when any tested card's memory gets this hot")
     ap.add_argument("--max-core-c", type=float, default=85.0)
+    ap.add_argument("--target-hbm-c", type=float, default=0.0,
+                    help="hold each card's memory near this temperature by pausing ITS hammer (default: 4 C under --max-hbm-c)")
     a = ap.parse_args()
     try:
         import torch, torch.multiprocessing as mp
@@ -201,7 +209,9 @@ def main():
     if a.self_test:
         a.minutes, a.max_chunks = min(a.minutes, 0.3), a.max_chunks or 4
     ctx = mp.get_context("spawn"); q = ctx.Queue()
-    procs = {g: ctx.Process(target=worker, args=(g, a, q), daemon=True) for g in gpus}
+    throttle = {g: ctx.Value("d", 0.0) for g in gpus}; stop = ctx.Event()
+    procs = {g: ctx.Process(target=worker, args=(g, a, q, throttle[g], stop), daemon=True) for g in gpus}
+    target = a.target_hbm_c or (a.max_hbm_c - 4.0)
     ident = {o: {"uuid": cuda[o], "smi_index": int(rows[cuda[o]][0]) if cuda[o] in rows else None,
                  "pci": rows[cuda[o]][2][-12:].lower() if cuda[o] in rows else None, "name": rows[cuda[o]][3] if cuda[o] in rows else None,
                  "mem_clock_mhz": fnum(rows[cuda[o]][4]) if cuda[o] in rows else None} for o in gpus}
@@ -224,10 +234,16 @@ def main():
                 for key, v in (("core_max", fnum(row[1])), ("hbm_max", fnum(row[2])), ("w_max", fnum(row[3]))):
                     if v is not None and (temps[g][key] is None or v > temps[g][key]):
                         temps[g][key] = v
+                # regulate: memory temperature where the card reports one, else core + 5 C
+                hot = fnum(row[2]) if fnum(row[2]) is not None else ((fnum(row[1]) or 0) + 5.0)
+                if hot >= target:
+                    throttle[g].value = min(0.9, throttle[g].value + 0.1)
+                elif hot <= target - 4.0:
+                    throttle[g].value = max(0.0, throttle[g].value - 0.05)
                 if (fnum(row[2]) or 0) >= a.max_hbm_c or (fnum(row[1]) or 0) >= a.max_core_c:
-                    thermal = f"GPU {g} reached core {row[1]} C / memory {row[2]} C (limits {a.max_core_c:.0f} / {a.max_hbm_c:.0f})"
-        if thermal:
-            break
+                    thermal = f"GPU {row[0]} reached core {row[1]} C / memory {row[2]} C (limits {a.max_core_c:.0f} / {a.max_hbm_c:.0f})"
+        if thermal and not stop.is_set():
+            stop.set(); deadline = min(deadline, time.time() + 240)      # let the workers finish their exact compare
         for g, p in procs.items():
             if g not in results and not p.is_alive() and p.exitcode is not None:
                 time.sleep(1)
@@ -249,9 +265,10 @@ def main():
         else:
             r["verdict"] = "pass" if (not r.get("error") and errs == 0 and r.get("phase") == "done") else "fail"
         cards.append(r)
-    if thermal:                      # too hot says nothing about the clock: no card gets a pass OR a fail from this run
+    if thermal:                      # stopped for temperature: a wrong bit is still a FAIL, but a clean short run is no PASS
         for c in cards:
-            c["verdict"] = "invalid"
+            if c["verdict"] == "pass" or c.get("phase") in ("thermal", "hung"):
+                c["verdict"] = "invalid"
     for r in absent:                       # listed by nvidia-smi but not usable by CUDA (for example "GPU requires reset")
         cards.append({"gpu": None, "smi_index": int(r[0]), "uuid": r[1], "pci": r[2][-12:].lower(), "name": r[3], "verdict": "fail",
                       "error": "card is not usable by CUDA (faulted or needs a reset)", "phase": "absent"})
@@ -270,7 +287,8 @@ def main():
         print(f"GPU {c.get('smi_index')} {c.get('pci', '?')} {c.get('mem_clock_mhz')} MHz: {c['verdict'].upper()}  "
               f"{c.get('gib', 0):.0f} GiB swept, pattern {c.get('pattern_errors')}, hammer {c.get('hammer_errors')} "
               f"({c.get('rotations')} rot, {c.get('copy_gbps')} GB/s), gemm {c.get('gemm_mismatch')}/{c.get('gemm_runs')}, "
-              f"ref {c.get('ref_mismatch')}, HBM max {c.get('hbm_max')} C{'  ERROR ' + c['error'] if c.get('error') else ''}", flush=True)
+              f"ref {c.get('ref_mismatch')}, HBM max {c.get('hbm_max')} C, throttled {c.get('throttled_s', 0):.0f} s"
+              f"{'  ERROR ' + c['error'] if c.get('error') else ''}", flush=True)
     if a.json:
         json.dump(doc, open(a.json, "w"), indent=1)
     print(json.dumps(doc))

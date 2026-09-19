@@ -1179,6 +1179,36 @@ _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
  * keeps the MDIV/PDIV the VBIOS programmed.
  * ------------------------------------------------------------------------- */
 
+#ifdef CMPUNLOCK_MCLK_NDIV
+/*
+ * Cards whose PLL registers did not answer after Booter Load. The post-GSP
+ * half must not touch them either (its multicast write needs no readback).
+ */
+static OBJGPU *cmpMclkSkipped[CMP_MAX_GPUS];
+
+static NvU32
+_cmpMclkSkipSlot(OBJGPU *pGpu)
+{
+    NvU32 i;
+
+    for (i = 0; i < CMP_MAX_GPUS - 1; i++)
+        if (cmpMclkSkipped[i] == pGpu || cmpMclkSkipped[i] == NULL)
+            break;
+    return i;
+}
+
+static NvBool
+_cmpMclkWasSkipped(OBJGPU *pGpu)
+{
+    NvU32 i;
+
+    for (i = 0; i < CMP_MAX_GPUS; i++)
+        if (cmpMclkSkipped[i] == pGpu)
+            return NV_TRUE;
+    return NV_FALSE;
+}
+#endif /* CMPUNLOCK_MCLK_NDIV */
+
 /* Timing table of this card as a percentage of stock, for the RESULT line. */
 #ifdef CMPUNLOCK_MCLK_TIMINGS
 # define CMP_TIMINGS_PCT_OF(pGpu) (100 + _cmpMclkTimingsPctFor(pGpu))
@@ -1316,6 +1346,27 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
         return;
     }
 
+    /*
+     * A PRI error is not an open gate. 0xbadf2010 has bit 4 set, so the check
+     * above lets it through, and on a card whose first FBPA does not answer
+     * (seen on one 8GB card: 4 of 8 FBPAs answer, VBIOS 92.00.6D.00.0A) the
+     * PLL cycle below then reaches only the FBPAs that do, while the post-GSP
+     * multicast write moves the rest without self-refresh, relock or DDLL
+     * calibration. That card corrupted data at every overclock it was given
+     * and is clean at the VBIOS clock. Leave such a card alone.
+     */
+    if (CMP_IS_PRI_ERROR(plm0) ||
+        CMP_IS_PRI_ERROR(GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF)))
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: %04x:%02x:%02x skipped, FBPA PLL registers do not answer "
+                  "(PLM=0x%08x COEFF=0x%08x); card left at the VBIOS clock\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu), plm0,
+                  GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF));
+        cmpMclkSkipped[_cmpMclkSkipSlot(pGpu)] = pGpu;
+        return;
+    }
+
     NV_PRINTF(LEVEL_ERROR,
               "HBMPLL_OC: start NDIV %u->%u (%u->%u MHz) devid=0x%04x vbios=%s PLM=0x%08x\n",
               curNdiv, newNdiv, 27 * curNdiv, 27 * newNdiv,
@@ -1427,7 +1478,7 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
-    if (_cmpMclkNdivFor(pGpu, NULL) == 0)
+    if (_cmpMclkNdivFor(pGpu, NULL) == 0 || _cmpMclkWasSkipped(pGpu))
     {
         const char *source = "stock";
         NvU32 rbNdiv, rbLock, rbLive;
@@ -1439,7 +1490,8 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
                   "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s fbpas=%u\n",
                   gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
                   rbNdiv, 27U * rbNdiv, rbLock, CMP_TIMINGS_PCT_OF(pGpu),
-                  (source[0] == 's' && source[1] == 'a') ? "safe" : "stock", rbLive);
+                  _cmpMclkWasSkipped(pGpu) ? "skipped" :
+                  ((source[0] == 's' && source[1] == 'a') ? "safe" : "stock"), rbLive);
     }
     else
     {

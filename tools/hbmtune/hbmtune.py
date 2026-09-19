@@ -316,8 +316,8 @@ def is_live(result, want):
     if not result:
         return False
     if want == 0:
-        return result.get("source") in ("stock", "safe")
-    return result.get("ndiv") == want and result.get("source") != "stock"
+        return result.get("source") in ("stock", "safe", "skipped")
+    return result.get("ndiv") == want and result.get("source") not in ("stock", "safe", "skipped")
 
 
 def render_modprobe(st, conf, vector=None):
