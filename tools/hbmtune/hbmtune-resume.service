@@ -1,0 +1,15 @@
+[Unit]
+Description=hbmtune: continue an automatic HBM clock search after a reboot (does nothing when no search is active)
+After=multi-user.target nvidia-persistenced.service docker.service
+ConditionPathExists=/var/lib/hbmtune/state.json
+
+[Service]
+Type=simple
+# Give the driver, the containers and the fan control a moment to settle before the gates load the cards.
+ExecStartPre=/bin/sleep 90
+ExecStart=/usr/bin/python3 /usr/local/lib/hbmtune/hbmtune.py auto resume
+Restart=no
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

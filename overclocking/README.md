@@ -139,7 +139,15 @@ sudo ./install.sh
 
 Cold reboot (full power off) after any of these.
 
-In a mixed 8GB + 10GB system the multiplier is compiled in once and lands on **every** card, and stock differs per variant — pick a value that is safe for the weakest one. (**in progress**)
+### A clock for each card (`--mclk-percard`)
+
+Without it the multiplier is compiled in once and lands on **every** card, so the weakest card (or, in a mixed 8GB + 10GB system, the variant with the lower stock clock) sets the clock for all of them.
+
+```bash
+sudo ./install.sh --mclk-ndiv=64 --mclk-percard    # --mclk-ndiv is now only the default for cards without a value
+```
+
+Each card then reads its own multiplier (`cmpMclkNdiv`, 0 = leave the VBIOS clock) and timing percentage (`cmpMclkTimingsPct`) from the driver's per-device registry, with no rebuild. [`tools/hbmtune`](../tools/hbmtune/) finds the values with an automatic search (climb, bisect, margin, soak; full-VRAM pattern sweep and bit-exact GEMM gates), writes them, and keeps a manual override per card. `nvidia.NVreg_RegistryDwords=cmpMclkSafe=1` on the kernel command line skips the memory tunables for one boot.
 
 </details>
 
