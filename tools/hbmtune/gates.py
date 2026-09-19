@@ -76,9 +76,12 @@ def worker(gpu, a, q):
 
         def compare(kind, c, buf, tag):
             expect(kind, c, scratch)
-            bad = int((buf != scratch).sum().item())
+            if torch.equal(buf, scratch):                       # the common case needs no mask at all
+                return 0
+            mask = buf != scratch
+            bad = int(torch.count_nonzero(mask).item())         # not mask.sum(): that upcasts the mask to int64 (8x its size)
             if bad:
-                pos = (buf != scratch).nonzero()[:4].flatten().tolist()
+                pos = mask.nonzero()[:4].flatten().tolist()
                 for p_ in pos:
                     got, exp = int(buf[p_].item()), int(scratch[p_].item())
                     if len(res["examples"]) < 12:
@@ -148,6 +151,7 @@ def worker(gpu, a, q):
                 break
         res["copy_gbps"] = round(copied / t_copy / 1e9, 1) if t_copy else None
         res["phase"] = "final-compare"
+        mats.clear(); del x, y, first; torch.cuda.empty_cache()
         r = res["rotations"] % want
         exact = sum(compare("random", (c + r) % want, buf, "hammer") for c, buf in enumerate(chunks))
         if a.self_test:
@@ -162,9 +166,9 @@ def worker(gpu, a, q):
 # ----------------------------------------------------------------------------------------------- parent
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--gpus", default="all", help="comma list of GPU indices, or all")
+    ap.add_argument("--gpus", default="all", help="all, or a comma list of nvidia-smi indices, PCI addresses or UUIDs")
     ap.add_argument("--minutes", type=float, default=5.0, help="length of the hammer phase")
-    ap.add_argument("--chunk-gib", type=float, default=1.0); ap.add_argument("--reserve-gib", type=float, default=2.0)
+    ap.add_argument("--chunk-gib", type=float, default=1.0); ap.add_argument("--reserve-gib", type=float, default=3.0)
     ap.add_argument("--max-chunks", type=int, default=0); ap.add_argument("--gemm-n", type=int, default=8192)
     ap.add_argument("--gemm-burst", type=int, default=2); ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument("--ref", help="JSON file with GEMM reference hashes from a known-good clock")
@@ -180,14 +184,29 @@ def main():
             raise RuntimeError("no CUDA device visible")
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"error": f"gates cannot run: {e}"})); return 2
-    gpus = list(range(ngpu)) if a.gpus == "all" else [int(x) for x in a.gpus.split(",")]
+    # CUDA ordinals are NOT nvidia-smi indices: a faulted card drops out of CUDA's list and the ones after it move up.
+    # Identity therefore comes from the UUID CUDA reports for each ordinal; nvidia-smi rows are matched by UUID.
+    cuda = {}
+    for i in range(ngpu):
+        try:
+            cuda[i] = "GPU-" + str(torch.cuda.get_device_properties(i).uuid)
+        except Exception:  # noqa: BLE001  (ordinal that CUDA counts but cannot open)
+            pass
+    rows = {r[1]: r for r in smi("index,uuid,pci.bus_id,name,clocks.mem")}
+    want = None if a.gpus == "all" else {x.strip() for x in a.gpus.split(",")}       # smi indices, PCI addresses or UUIDs
+    gpus = [o for o, u in cuda.items() if want is None or u in want or (u in rows and (rows[u][0] in want or rows[u][2][-12:].lower() in {w.lower()[-12:] for w in want}))]
+    if not gpus:
+        print(json.dumps({"error": f"no usable CUDA device matches --gpus {a.gpus}; CUDA sees {list(cuda.values())}"})); return 2
     a.ref = json.load(open(a.ref)).get("gemm_sha") if a.ref else None
     if a.self_test:
         a.minutes, a.max_chunks = min(a.minutes, 0.3), a.max_chunks or 4
     ctx = mp.get_context("spawn"); q = ctx.Queue()
     procs = {g: ctx.Process(target=worker, args=(g, a, q), daemon=True) for g in gpus}
-    ident = {int(r[0]): {"uuid": r[1], "pci": r[2][-12:].lower(), "name": r[3], "mem_clock_mhz": fnum(r[4])}
-             for r in smi("index,uuid,pci.bus_id,name,clocks.mem")}
+    ident = {o: {"uuid": cuda[o], "smi_index": int(rows[cuda[o]][0]) if cuda[o] in rows else None,
+                 "pci": rows[cuda[o]][2][-12:].lower() if cuda[o] in rows else None, "name": rows[cuda[o]][3] if cuda[o] in rows else None,
+                 "mem_clock_mhz": fnum(rows[cuda[o]][4]) if cuda[o] in rows else None} for o in gpus}
+    smi_to_ord = {v["smi_index"]: o for o, v in ident.items() if v["smi_index"] is not None}
+    absent = [r for u, r in rows.items() if u not in cuda.values()]
     t0 = time.time()
     for p in procs.values():
         p.start()
@@ -200,7 +219,7 @@ def main():
         except Exception:  # noqa: BLE001  (queue.Empty)
             pass
         for row in smi("index,temperature.gpu,temperature.memory,power.draw"):
-            g = int(row[0])
+            g = smi_to_ord.get(int(row[0]))
             if g in temps:
                 for key, v in (("core_max", fnum(row[1])), ("hbm_max", fnum(row[2])), ("w_max", fnum(row[3]))):
                     if v is not None and (temps[g][key] is None or v > temps[g][key]):
@@ -233,6 +252,9 @@ def main():
     if thermal:                      # too hot says nothing about the clock: no card gets a pass OR a fail from this run
         for c in cards:
             c["verdict"] = "invalid"
+    for r in absent:                       # listed by nvidia-smi but not usable by CUDA (for example "GPU requires reset")
+        cards.append({"gpu": None, "smi_index": int(r[0]), "uuid": r[1], "pci": r[2][-12:].lower(), "name": r[3], "verdict": "fail",
+                      "error": "card is not usable by CUDA (faulted or needs a reset)", "phase": "absent"})
     doc = {"tool": "hbmtune-gates", "version": 1, "thermal_stop": thermal, "self_test": a.self_test, "minutes": a.minutes, "seconds": round(time.time() - t0, 1),
            "when_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cards": cards,
            "all_pass": all(c["verdict"] == "pass" for c in cards)}
@@ -245,7 +267,7 @@ def main():
         else:
             doc["ref_written"] = None; doc["ref_note"] = "cards disagree on the GEMM bits; no reference written"
     for c in cards:
-        print(f"GPU {c['gpu']} {c.get('pci', '?')} {c.get('mem_clock_mhz')} MHz: {c['verdict'].upper()}  "
+        print(f"GPU {c.get('smi_index')} {c.get('pci', '?')} {c.get('mem_clock_mhz')} MHz: {c['verdict'].upper()}  "
               f"{c.get('gib', 0):.0f} GiB swept, pattern {c.get('pattern_errors')}, hammer {c.get('hammer_errors')} "
               f"({c.get('rotations')} rot, {c.get('copy_gbps')} GB/s), gemm {c.get('gemm_mismatch')}/{c.get('gemm_runs')}, "
               f"ref {c.get('ref_mismatch')}, HBM max {c.get('hbm_max')} C{'  ERROR ' + c['error'] if c.get('error') else ''}", flush=True)
