@@ -326,7 +326,8 @@ def render_modprobe(st, conf, vector=None):
         if not e.get("bdf"):
             continue
         ndiv, tp, src = effective(st, conf, uuid, vector)
-        keys = ["cmpMclkSafe=1"] if st.get("safe") else [f"cmpMclkNdiv={ndiv}"] + ([f"cmpMclkTimingsPct={tp}"] if tp != 100 else [])
+        keys = ["cmpMclkSafe=1"] if st.get("safe") else [f"cmpMclkNdiv={ndiv}"] + ([f"cmpMclkTimingsPct={tp}"] if tp != 100 else []) \
+            + (["cmpMclkBroadcast=1"] if (e.get("manual") or {}).get("broadcast") or e.get("broadcast") else [])
         parts.append(f"pci={e['bdf']};" + ";".join(keys))
         lines.append(f"#   {e['bdf']}  NDIV {ndiv:>2} = {27 * ndiv:>4} MHz  timings {tp:>3} %  ({src})  {uuid}")
     head = ["# Written by hbmtune. Do not edit: use `hbmtune set`, `hbmtune auto`, `hbmtune safe`.",
@@ -573,7 +574,8 @@ def cmd_status(be, conf, st):
         livetxt = f"{r['ndiv']}={r['mhz']}MHz" if r else (f"{c['mhz']:.0f}MHz" if c and c["mhz"] else "absent")
         h = e["history"][-1] if e["history"] else None
         print(f"{e.get('index', '?'):>3} {e.get('bdf', '?'):<13} {livetxt:>12} {f'{ndiv}={27 * ndiv}MHz t{tp}%':>16} {src:<9} "
-              f"{'yes' if (e.get('manual') or {}).get('locked') else '-':<5} " + (f"{h['when']} NDIV {h['ndiv']} {h['result']} {h.get('why', '')}" if h else "-"))
+              f"{'yes' if (e.get('manual') or {}).get('locked') else '-':<5} " + ("[broadcast] " if e.get("broadcast") else "")
+              + (f"{h['when']} NDIV {h['ndiv']} {h['result']} {h.get('why', '')}" if h else "-"))
     if st.get("safe"):
         print("SAFE is on: the next driver load ignores every memory tunable")
     got = be.received_perdevice() if hasattr(be, "received_perdevice") else None
@@ -610,6 +612,9 @@ def cmd_set(be, conf, st, a):
         if a.timings < 100 and not a.force:
             raise SystemExit("tightening can hang the card until a reboot; add --force if you mean it")
         man["timings_pct"] = a.timings
+    if a.broadcast is not None:
+        # card-level property, kept when the manual value is unset: its populated HBM sites do not answer unicast access
+        e["broadcast"] = (a.broadcast == "on")
     if a.lock:
         man["locked"] = True
     if a.note:
@@ -617,7 +622,8 @@ def cmd_set(be, conf, st, a):
     man["when"] = now(); e["manual"] = man; save_state(st)
     be.write_modprobe(render_modprobe(st, conf))
     ndiv, tp, src = effective(st, conf, uuid)
-    print(f"{e['bdf']}: NDIV {ndiv} ({27 * ndiv} MHz), timings {tp} %, source {src}{', locked' if man['locked'] else ''}. "
+    print(f"{e['bdf']}: NDIV {ndiv} ({27 * ndiv} MHz), timings {tp} %, source {src}{', locked' if man['locked'] else ''}"
+          f"{', broadcast clock sequence' if e.get('broadcast') else ''}. "
           f"Written to {MODPROBE}; live at the next driver load (reboot).")
 
 
@@ -628,6 +634,8 @@ def main(argv=None, be=None):
     sub.add_parser("status"); sub.add_parser("apply"); sub.add_parser("selfcheck")
     p = sub.add_parser("set"); p.add_argument("card"); p.add_argument("--ndiv", type=int); p.add_argument("--timings", type=int)
     p.add_argument("--lock", action="store_true"); p.add_argument("--note", default=""); p.add_argument("--force", action="store_true")
+    p.add_argument("--broadcast", choices=["on", "off"], help="clock sequence through the FBPA broadcast aperture for this card "
+                   "(for a card whose first FBPA does not answer; `fbpa_dump` shows it)")
     for name in ("unset", "lock", "unlock"):
         sub.add_parser(name).add_argument("card")
     p = sub.add_parser("test"); p.add_argument("--minutes", type=float)

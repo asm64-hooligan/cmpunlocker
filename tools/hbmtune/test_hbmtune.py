@@ -255,6 +255,16 @@ class ManualOverride(unittest.TestCase):
         out = H.main(["auto", "start"], be=be)                             # the pinned card stays out of the search
         self.assertEqual(out, "done"); self.assertIn(f"pci={BDF['b']};cmpMclkNdiv=0", be.text)
 
+    def test_broadcast_flag_is_a_card_property(self):
+        conf, be = fresh(limit={"a": 70, "b": 70})
+        os.makedirs(os.path.dirname(H.CONF), exist_ok=True); open(H.CONF, "w").write("baseline_ndiv = 66\napply_mode = reload\n")
+        H.main(["set", "1", "--ndiv", "66", "--broadcast", "on"], be=be)
+        self.assertIn(f"pci={BDF['b']};cmpMclkNdiv=66;cmpMclkBroadcast=1", be.text)
+        self.assertNotIn("cmpMclkBroadcast", be.text.split(f"pci={BDF['a']}")[1].split(";pci=")[0])
+        H.main(["unset", "1"], be=be)                                       # the value goes, the card property stays
+        self.assertIn(f"pci={BDF['b']};cmpMclkNdiv=66;cmpMclkBroadcast=1", be.text)
+        H.main(["set", "1", "--broadcast", "off"], be=be); self.assertNotIn("cmpMclkBroadcast", be.text)
+
     def test_pci_address_forms(self):
         self.assertEqual(H.norm_bdf("00000000:41:00.0"), "0000:41:00.0"); self.assertEqual(H.norm_bdf("0000:C4:00"), "0000:c4:00.0")
 
