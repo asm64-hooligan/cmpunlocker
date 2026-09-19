@@ -42,6 +42,9 @@ DEFAULTS = {
     "extra_gate_cmd": "",        # optional second gate (your own workload); prints the same JSON, a card must pass both
     "preflight_cmd": "",         # must exit 0 before any test (production stopped, fans fine, ...)
     "pre_reload_cmd": "systemctl stop nvidia-persistenced", "post_reload_cmd": "systemctl start nvidia-persistenced",
+    # The driver usually loads from the initramfs, which carries its own copy of /etc/modprobe.d. A value that is not in
+    # the boot image is not read at boot. auto = update-initramfs / dracut / mkinitcpio, whichever exists; none = skip.
+    "initramfs_cmd": "auto",
     "expected_cards": 0,         # 0 = whatever is present at `auto start`
 }
 
@@ -152,6 +155,34 @@ class Backend:
         with open(tmp, "w") as f:
             f.write(text); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, MODPROBE)
+        self.refresh_boot_image()
+
+    def refresh_boot_image(self):
+        """Put the new modprobe file into the boot image. Without this the driver keeps reading the old values at boot."""
+        cmd = self.c["initramfs_cmd"].strip()
+        if ROOT or cmd == "none":
+            return True
+        if cmd == "auto":
+            cmd = next((c for t, c in (("update-initramfs", "update-initramfs -u"), ("dracut", "dracut --force"),
+                                       ("mkinitcpio", "mkinitcpio -P")) if self.sh(f"command -v {t}", 20).returncode == 0), "")
+        if not cmd:
+            print("note: no initramfs tool found; if your driver loads from the boot image, rebuild it by hand"); return False
+        print(f"rebuilding the boot image ({cmd}) so the driver reads the new values at boot ...", flush=True)
+        r = self.sh(cmd, 1200)
+        if r.returncode != 0:
+            print(f"WARNING: '{cmd}' failed (exit {r.returncode}): {(r.stderr or r.stdout)[-300:]}\n"
+                  "The new values are NOT in the boot image."); return False
+        return True
+
+    def received_perdevice(self):
+        """The per-device option string the LOADED driver got (empty = the boot image did not carry our file)."""
+        try:
+            for l in open("/proc/driver/nvidia/params"):
+                if l.startswith("RegistryDwordsPerDevice:"):
+                    return l.split(":", 1)[1].strip().strip('"')
+        except OSError:
+            pass
+        return None
 
     def other_perdevice_files(self):
         d = os.path.dirname(MODPROBE); out = []
@@ -278,6 +309,17 @@ def effective(st, conf, uuid, vector=None):
     return conf["baseline_ndiv"], tp, "baseline"
 
 
+def is_live(result, want):
+    """Does the driver's RESULT line say this card runs what we asked for? 0 = "leave the VBIOS clock": then the proof is
+    source=stock (the PLL was not touched); the ndiv field is not used, because on some cards the first FBPA's PLL
+    register does not read back."""
+    if not result:
+        return False
+    if want == 0:
+        return result.get("source") in ("stock", "safe")
+    return result.get("ndiv") == want and result.get("source") != "stock"
+
+
 def render_modprobe(st, conf, vector=None):
     parts, lines = [], []
     for uuid, e in sorted(st["cards"].items(), key=lambda kv: kv[1].get("bdf", "")):
@@ -320,7 +362,8 @@ class Auto:
         want = [find_card(self.st, k) for k in cards_arg] if cards_arg else [c["uuid"] for c in found]
         for c in found:
             e = self.st["cards"][c["uuid"]]; live = res.get(c["bdf"], {}).get("ndiv")
-            sess["known_good"][c["uuid"]] = live if live else effective(self.st, self.c, c["uuid"])[0]
+            stock = res.get(c["bdf"], {}).get("source") in ("stock", "safe")
+            sess["known_good"][c["uuid"]] = 0 if stock else (live if live else effective(self.st, self.c, c["uuid"])[0])
             if c["uuid"] in want and not (e.get("manual") or {}).get("locked"):
                 p_card = dict(p, baseline=sess["known_good"][c["uuid"]])
                 sess["cards"][c["uuid"]] = dict(new_search(), baseline=p_card["baseline"])
@@ -390,7 +433,7 @@ class Auto:
             s["pending"] = {"vector": vec, "raised": raised, "stage": "applied", "boots": 0, "when": now(), "boot_id": self.be.boot_id()}
             self.be.write_modprobe(render_modprobe(self.st, self.c, vec)); save_state(self.st)
             self.log(f"iteration {s['iteration']} ({s['phase']}): " + ", ".join(f"{self.st['cards'][u]['bdf']}={v}" for u, v in sorted(vec.items())))
-            live_ok = all(res.get(self.st["cards"][u]["bdf"], {}).get("ndiv") == v for u, v in vec.items() if self.st["cards"][u].get("bdf"))
+            live_ok = all(is_live(res.get(self.st["cards"][u]["bdf"], {}), v) for u, v in vec.items() if self.st["cards"][u].get("bdf"))
             if live_ok:
                 return "continue"                             # already live (first baseline iteration)
             return self.make_live()
@@ -409,7 +452,7 @@ class Auto:
             if not any(m in pend["raised"] for m in missing):
                 self.unattributed_failure(f"{s['expected'] - len(found)} card(s) missing after the driver load")
             return self.rollback(None)
-        not_live = [u for u, v in pend["vector"].items() if res.get(self.st["cards"][u]["bdf"], {}).get("ndiv") != v]
+        not_live = [u for u, v in pend["vector"].items() if not is_live(res.get(self.st["cards"][u]["bdf"], {}), v)]
         if not_live:
             unlocked = [u for u in not_live if res.get(self.st["cards"][u]["bdf"], {}).get("lock") == 0]
             if pend["boots"] >= 1 and s["params"]["apply_mode"] != "manual" and not unlocked:
@@ -533,6 +576,10 @@ def cmd_status(be, conf, st):
               f"{'yes' if (e.get('manual') or {}).get('locked') else '-':<5} " + (f"{h['when']} NDIV {h['ndiv']} {h['result']} {h.get('why', '')}" if h else "-"))
     if st.get("safe"):
         print("SAFE is on: the next driver load ignores every memory tunable")
+    got = be.received_perdevice() if hasattr(be, "received_perdevice") else None
+    if got == "" and os.path.exists(MODPROBE):
+        print("WARNING: the loaded driver received NO per-device options, so the values above were not read at this boot. "
+              "The boot image is older than the modprobe file: run `hbmtune apply`, then reboot.")
     s = st.get("session")
     if s:
         print(f"auto session {s['id']}: phase {s['phase']}, iteration {s['iteration']}, mode {s['params']['apply_mode']}"

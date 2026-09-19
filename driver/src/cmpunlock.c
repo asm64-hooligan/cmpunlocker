@@ -1188,6 +1188,43 @@ _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
 
 #ifdef CMPUNLOCK_MCLK_NDIV
 /*
+ * PLL state for the RESULT line, read from the first FBPA that answers.
+ *
+ * FBPA 0 is not always there: one 8GB card (VBIOS 92.00.6D.00.0A) answers on
+ * 4 of its FBPAs only and returns a PRI error (0xbadf2010) for the first
+ * one, which used to show up as "NDIV=32 lock=0" although the card ran.
+ * Returns the number of FBPAs that answer.
+ */
+static NvU32
+_cmpPllReadback(OBJGPU *pGpu, NvU32 *pNdiv, NvU32 *pLock)
+{
+    NvU32 idx, live = 0;
+
+    *pNdiv = 0;
+    *pLock = 0;
+    for (idx = 0; idx < CMP_FBPA_COUNT; idx++)
+    {
+        NvU32 base  = CMP_FBPA_BASE + idx * CMP_FBPA_STRIDE;
+        NvU32 cfg   = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_CFG_OFFSET);
+        NvU32 coeff = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_COEFF_OFFSET);
+
+        if (cfg == 0 || coeff == 0 || CMP_IS_PRI_ERROR(cfg) || CMP_IS_PRI_ERROR(coeff))
+            continue;
+        if (live == 0)
+        {
+            *pNdiv = (coeff >> 8) & 0xFFU;
+            *pLock = (cfg >> 5) & 1U;
+        }
+        else if (((coeff >> 8) & 0xFFU) != *pNdiv || ((cfg >> 5) & 1U) == 0)
+        {
+            *pLock = 0;   /* FBPAs disagree, or one is not locked */
+        }
+        live++;
+    }
+    return live;
+}
+
+/*
  * Multiplier for this card, 0 = leave the clock the VBIOS programmed.
  *
  * Order: cmpMclkSafe (global or per card) > the card's cmpMclkNdiv key >
@@ -1392,14 +1429,17 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #ifdef CMPUNLOCK_MCLK_NDIV
     if (_cmpMclkNdivFor(pGpu, NULL) == 0)
     {
+        const char *source = "stock";
+        NvU32 rbNdiv, rbLock, rbLive;
+
+        (void)_cmpMclkNdivFor(pGpu, &source);   /* "safe" or "percard" (key = 0); both mean: PLL untouched */
+        rbLive = _cmpPllReadback(pGpu, &rbNdiv, &rbLock);
         /* One line per card in a fixed format: tools/hbmtune reads it. */
         NV_PRINTF(LEVEL_ERROR,
-                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=stock\n",
+                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s fbpas=%u\n",
                   gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
-                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
-                  27U * ((GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU),
-                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_CFG) >> 5) & 1U,
-                  CMP_TIMINGS_PCT_OF(pGpu));
+                  rbNdiv, 27U * rbNdiv, rbLock, CMP_TIMINGS_PCT_OF(pGpu),
+                  (source[0] == 's' && source[1] == 'a') ? "safe" : "stock", rbLive);
     }
     else
     {
@@ -1442,12 +1482,15 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               cfg, (cfg >> 5) & 1U, i);
 
     /* One line per card in a fixed format: tools/hbmtune reads it. */
-    NV_PRINTF(LEVEL_ERROR,
-              "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s\n",
-              gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
-              (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
-              27U * ((GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU),
-              (cfg >> 5) & 1U, CMP_TIMINGS_PCT_OF(pGpu), source);
+    {
+        NvU32 rbNdiv, rbLock, rbLive;
+
+        rbLive = _cmpPllReadback(pGpu, &rbNdiv, &rbLock);
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s fbpas=%u\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  rbNdiv, 27U * rbNdiv, rbLock, CMP_TIMINGS_PCT_OF(pGpu), source, rbLive);
+    }
     }
 #endif
 

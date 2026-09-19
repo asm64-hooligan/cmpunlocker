@@ -25,7 +25,8 @@ Without it, such a card stays at the clock the VBIOS programmed, which is what a
 
 Cards are named by index (`1`), PCI address (`0000:41:00.0`) or UUID.
 The state file uses the UUID, so a card keeps its value when it moves to another slot.
-The values go to `/etc/modprobe.d/cmp-hbmtune.conf` and become live at the next driver load:
+The values go to `/etc/modprobe.d/cmp-hbmtune.conf` and become live at the next driver load.
+The driver usually loads from the initramfs, which carries its own copy of `/etc/modprobe.d`, so hbmtune rebuilds the boot image after every change (`initramfs_cmd`, default `auto`). A value that is not in the boot image is simply not read at boot; `hbmtune status` says so when the loaded driver received no per-device options.
 
 ```
 options nvidia NVreg_RegistryDwordsPerDevice="pci=0000:01:00.0;cmpMclkNdiv=69;pci=0000:41:00.0;cmpMclkNdiv=65"
@@ -76,8 +77,10 @@ When a value is not live after the load, the tool moves from `reload` to `reboot
 The live value is read from the driver's own report, one line per card:
 
 ```
-HBMPLL_OC: RESULT pci=0000:41:00 ndiv=66 mhz=1782 lock=1 timings_pct=100 source=percard
+HBMPLL_OC: RESULT pci=0000:41:00 ndiv=66 mhz=1782 lock=1 timings_pct=100 source=percard fbpas=8
 ```
+
+`ndiv` and `lock` are read from the first FBPA that answers, and `fbpas` is how many answer. `source` is `percard`, `build`, `stock` (this card was told to keep the VBIOS clock, its PLL was not touched) or `safe`. For a card pinned to the VBIOS clock (`--ndiv 0`), `source=stock` is the proof that it is live.
 
 What counts as a failure for a card: any wrong bit in the gates, a PLL that does not lock, a card that is missing after the load, a value that does not become live.
 When the whole machine goes down with several cards raised, nobody is blamed: those cards are then raised one at a time.
@@ -107,6 +110,7 @@ Copy bandwidth has to go up with the clock. A flat or falling number means the c
 | `step` / `margin` | 2 / 1 | climb step; tested headroom under the lowest failure |
 | `quick_minutes` / `soak_minutes` / `test_minutes` | 6 / 45 / 10 | hammer time per search step, for the final soak, for `hbmtune test` |
 | `apply_mode` | reboot | `reload`, `reboot` or `manual` |
+| `initramfs_cmd` | auto | command that rebuilds the boot image after a change; `auto` = update-initramfs / dracut / mkinitcpio; `none` = skip |
 | `gate_cmd` | `python3 .../gates.py` | where PyTorch with CUDA lives, for example `docker exec mybox python3 /work/gates.py` |
 | `gate_ref` | | GEMM reference file, as `gate_cmd` sees it |
 | `extra_gate_cmd` | | optional second gate |

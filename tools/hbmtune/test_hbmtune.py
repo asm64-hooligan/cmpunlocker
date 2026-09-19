@@ -48,8 +48,8 @@ class FakeBox(H.Backend):
         res = {}
         for k in self.limit:
             nolock = k in self.nolock_at and self.live[k] >= self.nolock_at[k]
-            res[BDF[k]] = {"ndiv": self.live[k], "mhz": 27 * self.live[k], "lock": 0 if nolock else 1, "timings_pct": 100,
-                           "source": "safe" if self.safe_boot else "percard"}
+            res[BDF[k]] = {"ndiv": 32 if self.live[k] == 0 else self.live[k], "mhz": 27 * self.live[k], "lock": 0 if nolock else 1, "timings_pct": 100,
+                           "source": "safe" if self.safe_boot else ("stock" if self.live[k] == 0 else "percard")}
         return res, []
 
     def write_modprobe(self, text):
@@ -242,6 +242,18 @@ class ManualOverride(unittest.TestCase):
         H.main(["unset", "0"], be=be); self.assertIn(f"pci={BDF['a']};cmpMclkNdiv=69", be.text)
         H.main(["safe", "on"], be=be); self.assertIn(f"pci={BDF['a']};cmpMclkSafe=1", be.text); self.assertNotIn("cmpMclkNdiv", be.text.split("options")[1])
         H.main(["safe", "off"], be=be); self.assertIn("cmpMclkNdiv=69", be.text)
+
+    def test_card_pinned_to_the_vbios_clock(self):
+        conf, be = fresh(limit={"a": 70, "b": 66})
+        os.makedirs(os.path.dirname(H.CONF), exist_ok=True); open(H.CONF, "w").write("baseline_ndiv = 66\napply_mode = reload\n")
+        H.main(["set", "1", "--ndiv", "0", "--lock"], be=be)
+        self.assertIn(f"pci={BDF['b']};cmpMclkNdiv=0", be.text)
+        be.power_cycle(); self.assertEqual(be.live["b"], 0)
+        res, _ = be.driver_results()
+        self.assertTrue(H.is_live(res[BDF["b"]], 0), "source=stock proves the PLL was left alone even when the register reads 32")
+        self.assertFalse(H.is_live({"ndiv": 32, "lock": 0, "source": "build"}, 0), "source=build means the key was not read")
+        out = H.main(["auto", "start"], be=be)                             # the pinned card stays out of the search
+        self.assertEqual(out, "done"); self.assertIn(f"pci={BDF['b']};cmpMclkNdiv=0", be.text)
 
     def test_pci_address_forms(self):
         self.assertEqual(H.norm_bdf("00000000:41:00.0"), "0000:41:00.0"); self.assertEqual(H.norm_bdf("0000:C4:00"), "0000:c4:00.0")
