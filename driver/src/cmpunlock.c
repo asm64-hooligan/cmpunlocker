@@ -15,6 +15,42 @@
 #include "gpu/cmpunlock/cmpunlock.h"
 #include "gpu/cmpunlock/cmpunlock_config.h"
 
+/*
+ * Per-card memory tuning (--mclk-percard).
+ *
+ * The stock build compiles ONE multiplier and ONE timing percentage into the
+ * modules and applies them to every card. HBM stacks differ: in one four-card
+ * box three cards held NDIV 70 and the fourth corrupted data at 68. With
+ * CMPUNLOCK_MCLK_PERCARD both tunables are always compiled in and each card
+ * can be given its own values through the driver's per-device registry, with
+ * no rebuild:
+ *
+ *   options nvidia NVreg_RegistryDwordsPerDevice="pci=0000:01:00.0;cmpMclkNdiv=70;pci=0000:41:00.0;cmpMclkNdiv=66;cmpMclkTimingsPct=110"
+ *
+ *   cmpMclkNdiv        30..80  PLL multiplier for this card (N * 27 MHz)
+ *                      0       leave this card at the clock the VBIOS set
+ *   cmpMclkTimingsPct  50..150 DRAM timing table as a percentage of stock
+ *                              (120 = loosen by 20 %, 90 = tighten by 10 %)
+ *   cmpMclkSafe        1       ignore every memory tunable (keys and build
+ *                              defaults); works per card or, from the boot
+ *                              loader, for all cards:
+ *                              nvidia.NVreg_RegistryDwords=cmpMclkSafe=1
+ *
+ * A card without keys gets the build defaults (--mclk-ndiv / --mclk-timings),
+ * and without those it is left exactly as the VBIOS programmed it, which is
+ * what a mixed 8GB + 10GB system needs. Values out of range are ignored and
+ * reported. tools/hbmtune writes these keys, tests each card and keeps a
+ * manual override per card.
+ */
+#ifdef CMPUNLOCK_MCLK_PERCARD
+# ifndef CMPUNLOCK_MCLK_NDIV
+#  define CMPUNLOCK_MCLK_NDIV 0
+# endif
+# ifndef CMPUNLOCK_MCLK_TIMINGS
+#  define CMPUNLOCK_MCLK_TIMINGS (0)
+# endif
+#endif
+
 #include "gpu/mem_mgr/mem_mgr.h"
 #include "gpu/mem_mgr/heap.h"
 #include "gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator.h"
@@ -1005,10 +1041,37 @@ _cmpFieldMax(NvU8 width)
     return (width >= 32) ? 0xFFFFFFFFU : ((1U << width) - 1U);
 }
 
+/*
+ * Timing percentage for this card: the per-device key when it is valid,
+ * otherwise the build default. 0 means "stock table". The pass still runs
+ * at 0, because after a driver re-init without a power cycle the registers
+ * can hold an earlier scale, and scaling from the captured stock values by
+ * 0 % is what puts the VBIOS table back.
+ */
+static NvS32
+_cmpMclkTimingsPctFor(OBJGPU *pGpu)
+{
+    NvU32 data = 0;
+
+    if (osReadRegistryDword(pGpu, "cmpMclkSafe", &data) == NV_OK && data != 0)
+        return 0;
+#ifdef CMPUNLOCK_MCLK_PERCARD
+    data = 0;
+    if (osReadRegistryDword(pGpu, "cmpMclkTimingsPct", &data) == NV_OK)
+    {
+        if (data >= 50U && data <= 150U)
+            return (NvS32)data - 100;
+        NV_PRINTF(LEVEL_ERROR,
+                  "TIMING_SCALE: cmpMclkTimingsPct=%u ignored (valid: 50..150)\n", data);
+    }
+#endif
+    return (NvS32)(CMPUNLOCK_MCLK_TIMINGS);
+}
+
 static void
 _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
 {
-    const NvS32 pct = CMPUNLOCK_MCLK_TIMINGS;
+    const NvS32 pct = _cmpMclkTimingsPctFor(pGpu);
     NvU32 cfg10, cfg10New;
     NvU32 *pStock;
     NvBool captured = NV_FALSE;
@@ -1116,6 +1179,52 @@ _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
  * keeps the MDIV/PDIV the VBIOS programmed.
  * ------------------------------------------------------------------------- */
 
+/* Timing table of this card as a percentage of stock, for the RESULT line. */
+#ifdef CMPUNLOCK_MCLK_TIMINGS
+# define CMP_TIMINGS_PCT_OF(pGpu) (100 + _cmpMclkTimingsPctFor(pGpu))
+#else
+# define CMP_TIMINGS_PCT_OF(pGpu) (100)
+#endif
+
+#ifdef CMPUNLOCK_MCLK_NDIV
+/*
+ * Multiplier for this card, 0 = leave the clock the VBIOS programmed.
+ *
+ * Order: cmpMclkSafe (global or per card) > the card's cmpMclkNdiv key >
+ * the build default. Both halves of the overclock call this, so the PLL
+ * cycle after Booter Load and the post-GSP COEFF write always agree.
+ */
+static NvU32
+_cmpMclkNdivFor(OBJGPU *pGpu, const char **ppSource)
+{
+    NvU32 data = 0;
+
+    if (osReadRegistryDword(pGpu, "cmpMclkSafe", &data) == NV_OK && data != 0)
+    {
+        if (ppSource != NULL)
+            *ppSource = "safe";
+        return 0;
+    }
+#ifdef CMPUNLOCK_MCLK_PERCARD
+    data = 0;
+    if (osReadRegistryDword(pGpu, "cmpMclkNdiv", &data) == NV_OK)
+    {
+        if (data == 0U || (data >= 30U && data <= 80U))
+        {
+            if (ppSource != NULL)
+                *ppSource = "percard";
+            return data;
+        }
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: cmpMclkNdiv=%u ignored (valid: 0, 30..80)\n", data);
+    }
+#endif
+    if (ppSource != NULL)
+        *ppSource = "build";
+    return (NvU32)(CMPUNLOCK_MCLK_NDIV);
+}
+#endif /* CMPUNLOCK_MCLK_NDIV */
+
 void
 cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 {
@@ -1146,8 +1255,16 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
+    if (_cmpMclkNdivFor(pGpu, NULL) == 0)
     {
-    const NvU32 newNdiv = CMPUNLOCK_MCLK_NDIV;
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: %04x:%02x:%02x left at the VBIOS clock (NDIV %u)\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU);
+    }
+    else
+    {
+    const NvU32 newNdiv = _cmpMclkNdivFor(pGpu, NULL);
     NvU32 fbpaIdx, pollIdx;
     NvU32 fbpaCount = 0, failCount = 0;
     NvU32 plm0, fbio0, curNdiv;
@@ -1273,8 +1390,21 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
+    if (_cmpMclkNdivFor(pGpu, NULL) == 0)
     {
-    const NvU32 newNdiv = CMPUNLOCK_MCLK_NDIV;
+        /* One line per card in a fixed format: tools/hbmtune reads it. */
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=stock\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
+                  27U * ((GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU),
+                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_CFG) >> 5) & 1U,
+                  CMP_TIMINGS_PCT_OF(pGpu));
+    }
+    else
+    {
+    const char *source = "build";
+    const NvU32 newNdiv = _cmpMclkNdivFor(pGpu, &source);
     NvU32 coeffPre, plmPre, newCoeff, cfg = 0;
     NvU32 i;
 
@@ -1310,6 +1440,14 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF),
               (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
               cfg, (cfg >> 5) & 1U, i);
+
+    /* One line per card in a fixed format: tools/hbmtune reads it. */
+    NV_PRINTF(LEVEL_ERROR,
+              "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s\n",
+              gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+              (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
+              27U * ((GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU),
+              (cfg >> 5) & 1U, CMP_TIMINGS_PCT_OF(pGpu), source);
     }
 #endif
 
