@@ -118,7 +118,10 @@ class Backend:
         self.c = conf
 
     def sh(self, cmd, timeout=None):
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        try:
+            return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:          # a wedged driver blocks nvidia-smi for ever: report it, do not hang with it
+            return subprocess.CompletedProcess(cmd, 124, "", f"timeout after {timeout} s")
 
     def discover(self):
         r = self.sh("nvidia-smi --query-gpu=index,uuid,pci.bus_id,name,clocks.mem,memory.total --format=csv,noheader,nounits", 60)
@@ -253,6 +256,9 @@ def sync_cards(st, found):
 
 def find_card(st, key):
     key = key.strip()
+    if not st["cards"]:
+        raise SystemExit("no card is known yet and nvidia-smi gave no list (driver not loaded, or wedged by a faulted card). "
+                         "Try again after the next boot.")
     for uuid, e in st["cards"].items():
         if key == uuid or key == str(e.get("index")) or (":" in key and norm_bdf(key) == e.get("bdf")):
             return uuid
