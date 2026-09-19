@@ -52,7 +52,7 @@ def worker(gpu, a, q):
         torch.cuda.set_device(gpu); dev = torch.device("cuda", gpu)
         n = int(a.chunk_gib * GIB) // 8
         free, total = torch.cuda.mem_get_info(dev)
-        want = int((free - a.reserve_gib * GIB) // (n * 8)) - 1            # one chunk is the scratch copy
+        want = int((free - a.reserve_gib * GIB) // (n * 8)) - 2            # two more chunk-sized buffers: scratch copy, index ramp
         if a.max_chunks:
             want = min(want, a.max_chunks)
         if want < 2:
