@@ -92,6 +92,8 @@ def next_candidate(cs, p):
         return cand if cand < hi else None           # min_ndiv itself failed: nothing left to try
     if hi is None:
         cand = min(lo + p["step"], p["max_ndiv"])
+        if p.get("start") and lo == p["baseline"]:    # first move of a search started with --start: jump there
+            cand = min(max(cand, p["start"]), p["max_ndiv"])
         return cand if cand > lo else None           # reached the ceiling without a failure
     return (lo + hi) // 2 if hi - lo > 1 else None
 
@@ -350,7 +352,7 @@ class Auto:
     def params(self):
         return self.st["session"]["params"]
 
-    def start(self, cards_arg=None):
+    def start(self, cards_arg=None, start_at=None):
         found = self.be.discover(); sync_cards(self.st, found)
         if not found:
             raise SystemExit("no GPU visible")
@@ -358,6 +360,7 @@ class Auto:
         if not res:
             raise SystemExit("the driver logged no 'HBMPLL_OC: RESULT' line: install the fork with --mclk-percard first")
         p = {k: self.c[k] for k in ("min_ndiv", "max_ndiv", "step", "margin", "quick_minutes", "soak_minutes", "max_soak_rounds", "apply_mode")}
+        p["start"] = start_at
         sess = {"id": now(), "phase": "baseline", "iteration": 0, "params": p, "cards": {}, "pending": None, "solo": [],
                 "known_good": {}, "soak_rounds": 0, "log": [], "expected": self.c["expected_cards"] or len(found)}
         want = [find_card(self.st, k) for k in cards_arg] if cards_arg else [c["uuid"] for c in found]
@@ -367,9 +370,13 @@ class Auto:
             sess["known_good"][c["uuid"]] = 0 if stock else (live if live else effective(self.st, self.c, c["uuid"])[0])
             if c["uuid"] in want and not (e.get("manual") or {}).get("locked"):
                 p_card = dict(p, baseline=sess["known_good"][c["uuid"]])
-                sess["cards"][c["uuid"]] = dict(new_search(), baseline=p_card["baseline"])
+                # --start N: the live value is taken as proven (it was tested before this session), so the first step goes
+                # straight to N instead of re-testing the baseline and climbing one step at a time.
+                sess["cards"][c["uuid"]] = dict(new_search(lo=p_card["baseline"] if start_at else None), baseline=p_card["baseline"])
         if not sess["cards"]:
             raise SystemExit("every card is locked: nothing to search")
+        if start_at:
+            sess["phase"] = "search"
         self.st["session"] = sess
         self.log(f"auto session for {len(sess['cards'])} card(s); the values live now count as known good: "
                  + ", ".join(f"{self.st['cards'][u]['bdf']}={v}" for u, v in sess["known_good"].items()))
@@ -641,6 +648,7 @@ def main(argv=None, be=None):
     p = sub.add_parser("test"); p.add_argument("--minutes", type=float)
     p = sub.add_parser("auto"); p.add_argument("action", choices=["start", "resume", "status", "abort"]); p.add_argument("--cards", nargs="*")
     p.add_argument("--once", action="store_true", help="one step only (used by tests)")
+    p.add_argument("--start", type=int, help="the live values are already proven: skip the baseline test and try this NDIV first")
     p = sub.add_parser("safe"); p.add_argument("state", choices=["on", "off"])
     a = ap.parse_args(argv)
     conf = load_conf(); be = be or Backend(conf); st = load_state()
@@ -691,7 +699,9 @@ def main(argv=None, be=None):
         ok, why = be.preflight()
         if not ok:
             raise SystemExit(f"preflight refused: {why}")
-        auto.start(a.cards)
+        if a.start is not None and not (NDIV_MIN <= a.start <= conf["max_ndiv"]):
+            raise SystemExit(f"--start must be between {NDIV_MIN} and max_ndiv={conf['max_ndiv']}")
+        auto.start(a.cards, a.start)
     while True:
         r = auto.step()
         if r != "continue" or a.once:

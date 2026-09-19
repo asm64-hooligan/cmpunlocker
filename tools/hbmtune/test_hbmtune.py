@@ -216,6 +216,18 @@ class AutoSession(unittest.TestCase):
                 break
         self.assertEqual(out, "done"); self.assertEqual(H.load_state()["cards"][UU["a"]]["auto"]["chosen"], 69)
 
+    def test_start_high_skips_the_baseline_and_bisects_down(self):
+        conf, be = fresh(limit={"a": 73, "b": 68, "c": 70}, conf_over={"apply_mode": "reload"})
+        st = H.load_state(); auto = H.Auto(be, conf, st); auto.start(None, 70); out = None
+        for _ in range(200):
+            out = auto.step()
+            if out == "done":
+                break
+        st = H.load_state(); got = {k: st["cards"][UU[k]]["auto"]["chosen"] for k in "abc"}
+        self.assertEqual((out, got), ("done", {"a": 72, "b": 67, "c": 69}))
+        self.assertEqual(be.gate_runs[0], {"a": 70, "b": 70, "c": 70}, "first test is at --start, not at the baseline")
+        self.assertNotIn({"a": 66, "b": 66, "c": 66}, be.gate_runs)
+
     def test_missing_card_is_blamed(self):
         conf, be = fresh(limit={"a": 79, "b": 70}, missing_at={"a": 72}, conf_over={"apply_mode": "reload"})
         out, got, st = run_auto(conf, be)
