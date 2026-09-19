@@ -120,7 +120,8 @@
 #define CMP_FBPA_COUNT              12U
 #define CMP_FBPA_STRIDE             0x4000U
 #define CMP_FBPA_BASE               0x900000U
-#define CMP_FBPA_BCAST_BASE         0x9a0000U  /* broadcast aperture: every FBPA at once */
+#define CMP_FBPA_BCAST_BASE         0x9a0000U  /* broadcast aperture: gates, timings, self-refresh, DDLL */
+#define CMP_FBPA_MCAST_BASE         0x988000U  /* multicast aperture: the PLL block (COEFF_MC = base + 0x3c98) */
 #define CMP_FBPA_PLL_CFG_OFFSET     0x3c90U
 #define CMP_FBPA_PLL_COEFF_OFFSET   0x3c98U
 
@@ -1273,8 +1274,8 @@ _cmpPllReadback(OBJGPU *pGpu, NvU32 *pNdiv, NvU32 *pLock)
  * That card corrupted data at every overclock and is clean at the VBIOS clock.
  *
  * Every other step of the sequence (alert, self-refresh, DDLL calibration)
- * already goes through the broadcast aperture, and the PLL gates are opened
- * through it as well, so the PLL cycle is done the same way here. All FBPAs of
+ * already addresses all FBPAs at once, so the PLL cycle is done the same way
+ * here, through the multicast aperture the post-GSP half already uses. All FBPAs of
  * a card hold the same CFG/COEFF, so the values come from one that answers.
  * Lock cannot be read back for the silent sites: the answering ones are
  * polled and a fixed settle time is added.
@@ -1282,8 +1283,16 @@ _cmpPllReadback(OBJGPU *pGpu, NvU32 *pNdiv, NvU32 *pLock)
 static NvBool
 _cmpMclkBroadcastCycle(OBJGPU *pGpu, NvU32 newNdiv)
 {
-    const NvU32 bcCfg   = CMP_FBPA_BCAST_BASE + CMP_FBPA_PLL_CFG_OFFSET;
-    const NvU32 bcCoeff = CMP_FBPA_BCAST_BASE + CMP_FBPA_PLL_COEFF_OFFSET;
+    /*
+     * First hardware run (2026-09-19): PLL writes through the BROADCAST aperture
+     * (0x9a3c90/98) are ignored - the template FBPA still read NDIV 64 afterwards -
+     * while the post-GSP write through the MULTICAST aperture (0x98bc98) does move
+     * the PLLs. So the cycle goes through multicast, and it checks its own result:
+     * when the template FBPA does not show the new multiplier and lock, the card is
+     * treated as skipped, so the post-GSP half cannot change its clock either.
+     */
+    const NvU32 bcCfg   = CMP_FBPA_MCAST_BASE + CMP_FBPA_PLL_CFG_OFFSET;
+    const NvU32 bcCoeff = CMP_FBPA_MCAST_BASE + CMP_FBPA_PLL_COEFF_OFFSET;
     NvU32 idx, poll, tmplCfg = 0, tmplCoeff = 0, tmplBase = 0, lockCfg = 0;
     NvU32 fbio0, ddll0, calSt0 = 0, calSt1 = 0;
 
@@ -1300,12 +1309,12 @@ _cmpMclkBroadcastCycle(OBJGPU *pGpu, NvU32 newNdiv)
     }
     if (tmplBase == 0)
     {
-        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: broadcast cycle aborted, no FBPA answers\n");
+        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: multicast cycle aborted, no FBPA answers\n");
         return NV_FALSE;
     }
 
     NV_PRINTF(LEVEL_ERROR,
-              "HBMPLL_OC: %04x:%02x:%02x BROADCAST cycle NDIV %u->%u (%u->%u MHz), template FBPA%u CFG=0x%08x COEFF=0x%08x\n",
+              "HBMPLL_OC: %04x:%02x:%02x MULTICAST cycle NDIV %u->%u (%u->%u MHz), template FBPA%u CFG=0x%08x COEFF=0x%08x\n",
               gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
               (tmplCoeff >> 8) & 0xFFU, newNdiv, 27U * ((tmplCoeff >> 8) & 0xFFU), 27U * newNdiv,
               (tmplBase - CMP_FBPA_BASE) / CMP_FBPA_STRIDE, tmplCfg, tmplCoeff);
@@ -1330,7 +1339,7 @@ _cmpMclkBroadcastCycle(OBJGPU *pGpu, NvU32 newNdiv)
     }
     osDelay(20);    /* the sites that cannot be read get the same time again */
     if (!(lockCfg & 0x20U))
-        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: broadcast cycle, template FBPA did not lock (CFG=0x%08x)\n", lockCfg);
+        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: multicast cycle, template FBPA did not lock (CFG=0x%08x)\n", lockCfg);
     GPU_REG_WR32(pGpu, bcCfg, ((lockCfg & 0x20U) ? lockCfg : (tmplCfg | 0x09U)) & ~0x1000U);
 
     /* 4. exit self-refresh, 5. DDLL calibration, 6. clear the alert */
@@ -1349,12 +1358,17 @@ _cmpMclkBroadcastCycle(OBJGPU *pGpu, NvU32 newNdiv)
     GPU_REG_WR32(pGpu, CMP_REG_FBIO_BROADCAST,
                  GPU_REG_RD32(pGpu, CMP_REG_FBIO_BROADCAST) & ~0x80000000U);
 
-    NV_PRINTF(LEVEL_ERROR,
-              "HBMPLL_OC: broadcast cycle done, template FBPA now COEFF=0x%08x CFG=0x%08x lock=%u, DDLL cal status 0x%08x 0x%08x\n",
-              GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_COEFF_OFFSET),
-              GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_CFG_OFFSET),
-              (GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_CFG_OFFSET) >> 5) & 1U, calSt0, calSt1);
-    return NV_TRUE;
+    {
+        NvU32 endCoeff = GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_COEFF_OFFSET);
+        NvU32 endCfg   = GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_CFG_OFFSET);
+        NvBool took    = (((endCoeff >> 8) & 0xFFU) == newNdiv) && ((endCfg & 0x20U) != 0);
+
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: multicast cycle %s, template FBPA now COEFF=0x%08x (NDIV=%u) CFG=0x%08x lock=%u, DDLL cal status 0x%08x 0x%08x\n",
+                  took ? "done" : "DID NOT TAKE", endCoeff, (endCoeff >> 8) & 0xFFU, endCfg,
+                  (endCfg >> 5) & 1U, calSt0, calSt1);
+        return took;
+    }
 }
 
 /*
