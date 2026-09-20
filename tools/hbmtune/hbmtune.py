@@ -561,6 +561,7 @@ class Auto:
         if mode == "reboot":
             self.log("  rebooting to make the values live"); save_state(self.st); self.be.reboot(); return "reboot"
         self.log("  POWER-CYCLE NEEDED: shut down, wait 30 s, power on. The search continues by itself after the boot.")
+        save_state(self.st)            # the request must be in the state file: tools that do the power cycle read it there
         return "wait"
 
     def abort(self):
