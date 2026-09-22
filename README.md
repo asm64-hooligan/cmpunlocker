@@ -39,7 +39,7 @@ Then perform a cold reboot (full power off, then boot). The correct memory geome
 <details>
 <summary> HBM Memory overclock </summary>
 
-`--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N * 27` MHz. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB).
+`--mclk-ndiv=N` sets the FBPA PLL multiplier; the resulting clock is `N * 27` MHz. Add `--mclk-percard` to give every card its own multiplier and timings through the per-device registry; [`tools/hbmtune`](tools/hbmtune/) searches, tests and writes the per-card values and keeps a manual override. Any VBIOS works, on both `0x20C2` (8GB) and `0x2082` (10GB).
 
 ```bash
 sudo ./install.sh --mclk-ndiv=70   # 1890 MHz

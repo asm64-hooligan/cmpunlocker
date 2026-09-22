@@ -14,6 +14,11 @@
  * time; scaling them back up restores the margin. Undefined leaves the VBIOS
  * timing table untouched.
  *
+ * CMPUNLOCK_MCLK_PERCARD compiles the clock and timing code in for every card and
+ * reads each card's values from the per-device registry (cmpMclkNdiv,
+ * cmpMclkTimingsPct). The two macros above then only set the default for cards
+ * without keys, and a card with neither is left as the VBIOS programmed it.
+ *
  * CMPUNLOCK_ENABLE_P2P compiles in mailbox P2P support (--p2p): forces P2P
  * caps to OK and arms a PRI decode trap so the mailbox setup writes land on
  * CMP. Uses a 512 KB window inside the stock 64 MB BAR1 — no REBAR, no
@@ -37,6 +42,7 @@
 
 /* #define CMPUNLOCK_MCLK_NDIV 70 */
 /* #define CMPUNLOCK_MCLK_TIMINGS (20) */
+/* #define CMPUNLOCK_MCLK_PERCARD 1 */
 /* #define CMPUNLOCK_ENABLE_P2P 1 */
 /* #define CMPUNLOCK_DISABLE_GEN2 1 */
 /* #define CMPUNLOCK_ENABLE_LATE_PMA 1 */

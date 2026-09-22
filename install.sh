@@ -12,6 +12,7 @@ CONFIGURE_IOMMU=1
 MCLK_NDIV=""
 MCLK_TIMINGS=""
 ENABLE_P2P=""
+MCLK_PERCARD=""
 DISABLE_GEN2=""
 INSTALL_PERSIST=1
 PIN_PACKAGES=1
@@ -21,6 +22,7 @@ for arg in "$@"; do
         --no-iommu) CONFIGURE_IOMMU=0 ;;
         --mclk-ndiv=*) MCLK_NDIV="${arg#*=}" ;;
         --mclk-timings=*) MCLK_TIMINGS="${arg#*=}" ;;
+        --mclk-percard) MCLK_PERCARD=1 ;;
         --p2p) ENABLE_P2P=1 ;;
         --no-gen2) DISABLE_GEN2=1 ;;
         --no-persist) INSTALL_PERSIST=0 ;;
@@ -28,7 +30,7 @@ for arg in "$@"; do
         -v|--verbose) VERBOSE=1 ;;
         -h|--help)
             cat <<'EOF'
-Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [--no-gen2]
+Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--mclk-percard] [--p2p] [--no-gen2]
                          [--no-iommu] [--no-persist] [--no-pin] [-v]
 
   --no-iommu      Do not add iommu=pt to the kernel command line. IOMMU
@@ -58,6 +60,14 @@ Usage: sudo ./install.sh [--mclk-ndiv=N] [--mclk-timings=N] [--p2p] [--no-gen2]
                   data silently or wedges the memory controller.
                   Scaled: tRC tRFC tRAS tRP tRCD tWR tFAW tRRD.
                   Never touched: CL, WL, tCCD.
+  --mclk-percard  Per-card memory tuning. Compiles the clock and timing code in
+                  for every card and reads each card's own values from the
+                  driver's per-device registry (cmpMclkNdiv, cmpMclkTimingsPct),
+                  so cards with different HBM margins no longer share the
+                  weakest card's clock. --mclk-ndiv / --mclk-timings become the
+                  default for cards without keys; without them such a card is
+                  left as the VBIOS programmed it. tools/hbmtune finds, tests
+                  and writes the per-card values.
   --no-persist    Do not survive kernel updates. By default the installer wires
                   the patched modules into the kernel-update path, so a new
                   kernel gets them rebuilt automatically instead of booting on
@@ -358,6 +368,10 @@ else
     fi
 fi
 export CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}"
+export CMPUNLOCKER_MCLK_PERCARD="${MCLK_PERCARD}"
+if [[ -n "${MCLK_PERCARD}" ]]; then
+    ok "Per-card memory tuning compiled in (cmpMclkNdiv / cmpMclkTimingsPct per device, see tools/hbmtune)"
+fi
 export CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}"
 
 step "Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
@@ -415,6 +429,7 @@ chmod +x "${SCRIPT_DIR}/driver/build.sh"
 CMPUNLOCKER_DRIVER_VERSION="${detected}" \
 CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
 CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
+CMPUNLOCKER_MCLK_PERCARD="${MCLK_PERCARD}" \
 CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
 CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}" \
 CMPUNLOCKER_VERBOSE="${VERBOSE}" \
@@ -447,6 +462,7 @@ else
     if CMPUNLOCKER_DRIVER_VERSION="${detected}" \
        CMPUNLOCKER_MCLK_NDIV="${MCLK_NDIV}" \
        CMPUNLOCKER_MCLK_TIMINGS="${MCLK_TIMINGS}" \
+       CMPUNLOCKER_MCLK_PERCARD="${MCLK_PERCARD}" \
        CMPUNLOCKER_ENABLE_P2P="${ENABLE_P2P}" \
        CMPUNLOCKER_DISABLE_GEN2="${DISABLE_GEN2}" \
        CMPUNLOCKER_PIN_PACKAGES="${PIN_PACKAGES}" \

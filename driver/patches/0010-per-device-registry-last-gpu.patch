@@ -1,0 +1,19 @@
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -2404,6 +2404,16 @@
+     UNLOCK_NV_LINUX_DEVICES();
+ 
+     /*
++     * cmpunlocker: the per-GPU registry keys (NVreg_RegistryDwordsPerDevice) were
++     * parsed above, before this GPU was in nv_linux_devices, and the parser only
++     * writes keys for GPUs it finds in that list. Keys of a GPU were therefore
++     * written during the probe of the NEXT one, and the GPU probed last (or the
++     * only GPU) never received its keys. Parse again now that this GPU can be
++     * found; rewriting the keys of the others is harmless.
++     */
++    nv_parse_per_device_option_string(sp);
++
++    /*
+      * Create the procfs entry only after all the initialization operations for
+      * the nvl object are completed and the device is added to the
+      * nv_linux_devices global list

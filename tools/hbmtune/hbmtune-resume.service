@@ -1,0 +1,18 @@
+[Unit]
+Description=hbmtune: continue an automatic HBM clock search after a reboot (does nothing when no search is active)
+After=multi-user.target nvidia-persistenced.service docker.service
+ConditionPathExists=/var/lib/hbmtune/state.json
+
+[Service]
+Type=simple
+# Give the driver, the containers and the fan control a moment to settle before the gates load the cards.
+# systemd's default start timeout is 90 s and it covers ExecStartPre: a 90 s sleep loses that race about every other boot
+# (seen 2026-09-20: 'start-pre operation timed out', the search did not resume). Shorter sleep, explicit timeout.
+TimeoutStartSec=600
+ExecStartPre=/bin/sleep 60
+ExecStart=/usr/bin/python3 /usr/local/lib/hbmtune/hbmtune.py auto resume
+Restart=no
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

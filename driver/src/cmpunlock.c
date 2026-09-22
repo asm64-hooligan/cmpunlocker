@@ -15,6 +15,46 @@
 #include "gpu/cmpunlock/cmpunlock.h"
 #include "gpu/cmpunlock/cmpunlock_config.h"
 
+/*
+ * Per-card memory tuning (--mclk-percard).
+ *
+ * The stock build compiles ONE multiplier and ONE timing percentage into the
+ * modules and applies them to every card. HBM stacks differ: in one four-card
+ * box three cards held NDIV 70 and the fourth corrupted data at 68. With
+ * CMPUNLOCK_MCLK_PERCARD both tunables are always compiled in and each card
+ * can be given its own values through the driver's per-device registry, with
+ * no rebuild:
+ *
+ *   options nvidia NVreg_RegistryDwordsPerDevice="pci=0000:01:00.0;cmpMclkNdiv=70;pci=0000:41:00.0;cmpMclkNdiv=66;cmpMclkTimingsPct=110"
+ *
+ *   cmpMclkNdiv        30..80  PLL multiplier for this card (N * 27 MHz)
+ *                      0       leave this card at the clock the VBIOS set
+ *   cmpMclkTimingsPct  50..150 DRAM timing table as a percentage of stock
+ *                              (120 = loosen by 20 %, 90 = tighten by 10 %)
+ *   cmpMclkBroadcast   1       this card's populated HBM sites do not answer
+ *                              unicast access: run the PLL cycle through the
+ *                              broadcast aperture (see _cmpMclkBroadcastCycle).
+ *                              Without it such a card is left at the VBIOS clock.
+ *   cmpMclkSafe        1       ignore every memory tunable (keys and build
+ *                              defaults); works per card or, from the boot
+ *                              loader, for all cards:
+ *                              nvidia.NVreg_RegistryDwords=cmpMclkSafe=1
+ *
+ * A card without keys gets the build defaults (--mclk-ndiv / --mclk-timings),
+ * and without those it is left exactly as the VBIOS programmed it, which is
+ * what a mixed 8GB + 10GB system needs. Values out of range are ignored and
+ * reported. tools/hbmtune writes these keys, tests each card and keeps a
+ * manual override per card.
+ */
+#ifdef CMPUNLOCK_MCLK_PERCARD
+# ifndef CMPUNLOCK_MCLK_NDIV
+#  define CMPUNLOCK_MCLK_NDIV 0
+# endif
+# ifndef CMPUNLOCK_MCLK_TIMINGS
+#  define CMPUNLOCK_MCLK_TIMINGS (0)
+# endif
+#endif
+
 #include "gpu/mem_mgr/mem_mgr.h"
 #include "gpu/mem_mgr/heap.h"
 #include "gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator.h"
@@ -80,6 +120,8 @@
 #define CMP_FBPA_COUNT              12U
 #define CMP_FBPA_STRIDE             0x4000U
 #define CMP_FBPA_BASE               0x900000U
+#define CMP_FBPA_BCAST_BASE         0x9a0000U  /* broadcast aperture: gates, timings, self-refresh, DDLL */
+#define CMP_FBPA_MCAST_BASE         0x988000U  /* multicast aperture: the PLL block (COEFF_MC = base + 0x3c98) */
 #define CMP_FBPA_PLL_CFG_OFFSET     0x3c90U
 #define CMP_FBPA_PLL_COEFF_OFFSET   0x3c98U
 
@@ -1005,10 +1047,37 @@ _cmpFieldMax(NvU8 width)
     return (width >= 32) ? 0xFFFFFFFFU : ((1U << width) - 1U);
 }
 
+/*
+ * Timing percentage for this card: the per-device key when it is valid,
+ * otherwise the build default. 0 means "stock table". The pass still runs
+ * at 0, because after a driver re-init without a power cycle the registers
+ * can hold an earlier scale, and scaling from the captured stock values by
+ * 0 % is what puts the VBIOS table back.
+ */
+static NvS32
+_cmpMclkTimingsPctFor(OBJGPU *pGpu)
+{
+    NvU32 data = 0;
+
+    if (osReadRegistryDword(pGpu, "cmpMclkSafe", &data) == NV_OK && data != 0)
+        return 0;
+#ifdef CMPUNLOCK_MCLK_PERCARD
+    data = 0;
+    if (osReadRegistryDword(pGpu, "cmpMclkTimingsPct", &data) == NV_OK)
+    {
+        if (data >= 50U && data <= 150U)
+            return (NvS32)data - 100;
+        NV_PRINTF(LEVEL_ERROR,
+                  "TIMING_SCALE: cmpMclkTimingsPct=%u ignored (valid: 50..150)\n", data);
+    }
+#endif
+    return (NvS32)(CMPUNLOCK_MCLK_TIMINGS);
+}
+
 static void
 _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
 {
-    const NvS32 pct = CMPUNLOCK_MCLK_TIMINGS;
+    const NvS32 pct = _cmpMclkTimingsPctFor(pGpu);
     NvU32 cfg10, cfg10New;
     NvU32 *pStock;
     NvBool captured = NV_FALSE;
@@ -1116,6 +1185,230 @@ _cmpScaleTimings(OBJGPU *pGpu, const char *phase)
  * keeps the MDIV/PDIV the VBIOS programmed.
  * ------------------------------------------------------------------------- */
 
+#ifdef CMPUNLOCK_MCLK_NDIV
+/*
+ * Cards whose PLL registers did not answer after Booter Load. The post-GSP
+ * half must not touch them either (its multicast write needs no readback).
+ */
+static OBJGPU *cmpMclkSkipped[CMP_MAX_GPUS];
+
+static NvU32
+_cmpMclkSkipSlot(OBJGPU *pGpu)
+{
+    NvU32 i;
+
+    for (i = 0; i < CMP_MAX_GPUS - 1; i++)
+        if (cmpMclkSkipped[i] == pGpu || cmpMclkSkipped[i] == NULL)
+            break;
+    return i;
+}
+
+static NvBool
+_cmpMclkWasSkipped(OBJGPU *pGpu)
+{
+    NvU32 i;
+
+    for (i = 0; i < CMP_MAX_GPUS; i++)
+        if (cmpMclkSkipped[i] == pGpu)
+            return NV_TRUE;
+    return NV_FALSE;
+}
+#endif /* CMPUNLOCK_MCLK_NDIV */
+
+/* Timing table of this card as a percentage of stock, for the RESULT line. */
+#ifdef CMPUNLOCK_MCLK_TIMINGS
+# define CMP_TIMINGS_PCT_OF(pGpu) (100 + _cmpMclkTimingsPctFor(pGpu))
+#else
+# define CMP_TIMINGS_PCT_OF(pGpu) (100)
+#endif
+
+#ifdef CMPUNLOCK_MCLK_NDIV
+/*
+ * PLL state for the RESULT line, read from the first FBPA that answers.
+ *
+ * FBPA 0 is not always there: one 8GB card (VBIOS 92.00.6D.00.0A) answers on
+ * 4 of its FBPAs only and returns a PRI error (0xbadf2010) for the first
+ * one, which used to show up as "NDIV=32 lock=0" although the card ran.
+ * Returns the number of FBPAs that answer.
+ */
+static NvU32
+_cmpPllReadback(OBJGPU *pGpu, NvU32 *pNdiv, NvU32 *pLock)
+{
+    NvU32 idx, live = 0;
+
+    *pNdiv = 0;
+    *pLock = 0;
+    for (idx = 0; idx < CMP_FBPA_COUNT; idx++)
+    {
+        NvU32 base  = CMP_FBPA_BASE + idx * CMP_FBPA_STRIDE;
+        NvU32 cfg   = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_CFG_OFFSET);
+        NvU32 coeff = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_COEFF_OFFSET);
+
+        if (cfg == 0 || coeff == 0 || CMP_IS_PRI_ERROR(cfg) || CMP_IS_PRI_ERROR(coeff))
+            continue;
+        if (live == 0)
+        {
+            *pNdiv = (coeff >> 8) & 0xFFU;
+            *pLock = (cfg >> 5) & 1U;
+        }
+        else if (((coeff >> 8) & 0xFFU) != *pNdiv || ((cfg >> 5) & 1U) == 0)
+        {
+            *pLock = 0;   /* FBPAs disagree, or one is not locked */
+        }
+        live++;
+    }
+    return live;
+}
+
+/*
+ * PLL cycle through the FBPA broadcast aperture (opt-in per card: cmpMclkBroadcast=1).
+ *
+ * GA100 has six HBM sites with two FBPAs each. On most 8GB cards the four
+ * populated sites (FBPA 0,1,4,5,6,7,10,11) answer unicast register access and
+ * the two empty ones (2,3,8,9) return a PRI error 0xbadf2011 / 0xbadf2014. One
+ * card (another batch, same VBIOS) is the mirror image: only FBPA 2,3,8,9
+ * answer, yet all 64 GB are there and pass a full pattern sweep, so its memory
+ * sits behind sites the host cannot address one by one. The unicast cycle then
+ * retunes two empty sites, and the memory gets its new clock from the post-GSP
+ * multicast COEFF write alone: no self-refresh, no relock, no DDLL calibration.
+ * That card corrupted data at every overclock and is clean at the VBIOS clock.
+ *
+ * Every other step of the sequence (alert, self-refresh, DDLL calibration)
+ * already addresses all FBPAs at once, so the PLL cycle is done the same way
+ * here, through the multicast aperture the post-GSP half already uses. All FBPAs of
+ * a card hold the same CFG/COEFF, so the values come from one that answers.
+ * Lock cannot be read back for the silent sites: the answering ones are
+ * polled and a fixed settle time is added.
+ */
+static NvBool
+_cmpMclkBroadcastCycle(OBJGPU *pGpu, NvU32 newNdiv)
+{
+    /*
+     * First hardware run (2026-09-19): PLL writes through the BROADCAST aperture
+     * (0x9a3c90/98) are ignored - the template FBPA still read NDIV 64 afterwards -
+     * while the post-GSP write through the MULTICAST aperture (0x98bc98) does move
+     * the PLLs. So the cycle goes through multicast, and it checks its own result:
+     * when the template FBPA does not show the new multiplier and lock, the card is
+     * treated as skipped, so the post-GSP half cannot change its clock either.
+     */
+    const NvU32 bcCfg   = CMP_FBPA_MCAST_BASE + CMP_FBPA_PLL_CFG_OFFSET;
+    const NvU32 bcCoeff = CMP_FBPA_MCAST_BASE + CMP_FBPA_PLL_COEFF_OFFSET;
+    NvU32 idx, poll, tmplCfg = 0, tmplCoeff = 0, tmplBase = 0, lockCfg = 0;
+    NvU32 fbio0, ddll0, calSt0 = 0, calSt1 = 0;
+
+    for (idx = 0; idx < CMP_FBPA_COUNT; idx++)
+    {
+        NvU32 base  = CMP_FBPA_BASE + idx * CMP_FBPA_STRIDE;
+        NvU32 cfg   = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_CFG_OFFSET);
+        NvU32 coeff = GPU_REG_RD32(pGpu, base + CMP_FBPA_PLL_COEFF_OFFSET);
+
+        if (cfg == 0 || coeff == 0 || CMP_IS_PRI_ERROR(cfg) || CMP_IS_PRI_ERROR(coeff))
+            continue;
+        tmplCfg = cfg; tmplCoeff = coeff; tmplBase = base;
+        break;
+    }
+    if (tmplBase == 0)
+    {
+        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: multicast cycle aborted, no FBPA answers\n");
+        return NV_FALSE;
+    }
+
+    NV_PRINTF(LEVEL_ERROR,
+              "HBMPLL_OC: %04x:%02x:%02x MULTICAST cycle NDIV %u->%u (%u->%u MHz), template FBPA%u CFG=0x%08x COEFF=0x%08x\n",
+              gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+              (tmplCoeff >> 8) & 0xFFU, newNdiv, 27U * ((tmplCoeff >> 8) & 0xFFU), 27U * newNdiv,
+              (tmplBase - CMP_FBPA_BASE) / CMP_FBPA_STRIDE, tmplCfg, tmplCoeff);
+
+    /* 1. MEMCLK_CHANGE_ALERT, 2. HBM self-refresh (as in the unicast sequence) */
+    fbio0 = GPU_REG_RD32(pGpu, CMP_REG_FBIO_BROADCAST);
+    GPU_REG_WR32(pGpu, CMP_REG_FBIO_BROADCAST, fbio0 | 0x80000000U);
+    GPU_REG_WR32(pGpu, CMP_REG_HBM_SELF_REFRESH, 0x00000001U);
+    osDelay(5);
+
+    /* 3. PLL cycle on every FBPA at once */
+    GPU_REG_WR32(pGpu, bcCfg, tmplCfg & ~0x09U);
+    osDelay(2);
+    GPU_REG_WR32(pGpu, bcCoeff, (tmplCoeff & ~0xFF00U) | ((newNdiv & 0xFFU) << 8));
+    GPU_REG_WR32(pGpu, bcCfg, (tmplCfg | 0x09U) & ~0x20U);
+    for (poll = 0; poll < 200; poll++)
+    {
+        osDelay(1);
+        lockCfg = GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_CFG_OFFSET);
+        if (lockCfg & 0x20U)
+            break;
+    }
+    osDelay(20);    /* the sites that cannot be read get the same time again */
+    if (!(lockCfg & 0x20U))
+        NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: multicast cycle, template FBPA did not lock (CFG=0x%08x)\n", lockCfg);
+    GPU_REG_WR32(pGpu, bcCfg, ((lockCfg & 0x20U) ? lockCfg : (tmplCfg | 0x09U)) & ~0x1000U);
+
+    /* 4. exit self-refresh, 5. DDLL calibration, 6. clear the alert */
+    GPU_REG_WR32(pGpu, CMP_REG_HBM_SELF_REFRESH, 0x00000000U);
+    osDelay(10);
+    ddll0 = GPU_REG_RD32(pGpu, CMP_REG_DDLL_CAL);
+    GPU_REG_WR32(pGpu, CMP_REG_DDLL_CAL, ddll0 | 0x40U);
+    osDelay(10);
+    for (poll = 0; poll < 100; poll++)
+    {
+        osDelay(1);
+        calSt0 = GPU_REG_RD32(pGpu, CMP_REG_DDLL_CAL_STATUS_0);
+        calSt1 = GPU_REG_RD32(pGpu, CMP_REG_DDLL_CAL_STATUS_1);
+    }
+    GPU_REG_WR32(pGpu, CMP_REG_DDLL_CAL, ddll0 & ~0x40U);
+    GPU_REG_WR32(pGpu, CMP_REG_FBIO_BROADCAST,
+                 GPU_REG_RD32(pGpu, CMP_REG_FBIO_BROADCAST) & ~0x80000000U);
+
+    {
+        NvU32 endCoeff = GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_COEFF_OFFSET);
+        NvU32 endCfg   = GPU_REG_RD32(pGpu, tmplBase + CMP_FBPA_PLL_CFG_OFFSET);
+        NvBool took    = (((endCoeff >> 8) & 0xFFU) == newNdiv) && ((endCfg & 0x20U) != 0);
+
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: multicast cycle %s, template FBPA now COEFF=0x%08x (NDIV=%u) CFG=0x%08x lock=%u, DDLL cal status 0x%08x 0x%08x\n",
+                  took ? "done" : "DID NOT TAKE", endCoeff, (endCoeff >> 8) & 0xFFU, endCfg,
+                  (endCfg >> 5) & 1U, calSt0, calSt1);
+        return took;
+    }
+}
+
+/*
+ * Multiplier for this card, 0 = leave the clock the VBIOS programmed.
+ *
+ * Order: cmpMclkSafe (global or per card) > the card's cmpMclkNdiv key >
+ * the build default. Both halves of the overclock call this, so the PLL
+ * cycle after Booter Load and the post-GSP COEFF write always agree.
+ */
+static NvU32
+_cmpMclkNdivFor(OBJGPU *pGpu, const char **ppSource)
+{
+    NvU32 data = 0;
+
+    if (osReadRegistryDword(pGpu, "cmpMclkSafe", &data) == NV_OK && data != 0)
+    {
+        if (ppSource != NULL)
+            *ppSource = "safe";
+        return 0;
+    }
+#ifdef CMPUNLOCK_MCLK_PERCARD
+    data = 0;
+    if (osReadRegistryDword(pGpu, "cmpMclkNdiv", &data) == NV_OK)
+    {
+        if (data == 0U || (data >= 30U && data <= 80U))
+        {
+            if (ppSource != NULL)
+                *ppSource = "percard";
+            return data;
+        }
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: cmpMclkNdiv=%u ignored (valid: 0, 30..80)\n", data);
+    }
+#endif
+    if (ppSource != NULL)
+        *ppSource = "build";
+    return (NvU32)(CMPUNLOCK_MCLK_NDIV);
+}
+#endif /* CMPUNLOCK_MCLK_NDIV */
+
 void
 cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 {
@@ -1146,8 +1439,16 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
+    if (_cmpMclkNdivFor(pGpu, NULL) == 0)
     {
-    const NvU32 newNdiv = CMPUNLOCK_MCLK_NDIV;
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: %04x:%02x:%02x left at the VBIOS clock (NDIV %u)\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU);
+    }
+    else
+    {
+    const NvU32 newNdiv = _cmpMclkNdivFor(pGpu, NULL);
     NvU32 fbpaIdx, pollIdx;
     NvU32 fbpaCount = 0, failCount = 0;
     NvU32 plm0, fbio0, curNdiv;
@@ -1159,6 +1460,34 @@ cmpUnlockPostBooterLoad(OBJGPU *pGpu, KernelGsp *pKernelGsp)
     if ((plm0 & 0x10U) == 0)
     {
         NV_PRINTF(LEVEL_ERROR, "HBMPLL_OC: aborted, PLM=0x%08x (bit4 closed)\n", plm0);
+        return;
+    }
+
+    /*
+     * A PRI error is not an open gate. 0xbadf2010 has bit 4 set, so the check
+     * above lets it through, and on a card whose first FBPA does not answer
+     * (seen on one 8GB card: 4 of 8 FBPAs answer, VBIOS 92.00.6D.00.0A) the
+     * PLL cycle below then reaches only the FBPAs that do, while the post-GSP
+     * multicast write moves the rest without self-refresh, relock or DDLL
+     * calibration. That card corrupted data at every overclock it was given
+     * and is clean at the VBIOS clock. Leave such a card alone.
+     */
+    if (CMP_IS_PRI_ERROR(plm0) ||
+        CMP_IS_PRI_ERROR(GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF)))
+    {
+        NvU32 bc = 0;
+
+        if (osReadRegistryDword(pGpu, "cmpMclkBroadcast", &bc) == NV_OK && bc != 0 &&
+            _cmpMclkBroadcastCycle(pGpu, newNdiv))
+        {
+            return;
+        }
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: %04x:%02x:%02x skipped, FBPA PLL registers do not answer "
+                  "(PLM=0x%08x COEFF=0x%08x); card left at the VBIOS clock\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu), plm0,
+                  GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF));
+        cmpMclkSkipped[_cmpMclkSkipSlot(pGpu)] = pGpu;
         return;
     }
 
@@ -1273,8 +1602,25 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
 #endif
 
 #ifdef CMPUNLOCK_MCLK_NDIV
+    if (_cmpMclkNdivFor(pGpu, NULL) == 0 || _cmpMclkWasSkipped(pGpu))
     {
-    const NvU32 newNdiv = CMPUNLOCK_MCLK_NDIV;
+        const char *source = "stock";
+        NvU32 rbNdiv, rbLock, rbLive;
+
+        (void)_cmpMclkNdivFor(pGpu, &source);   /* "safe" or "percard" (key = 0); both mean: PLL untouched */
+        rbLive = _cmpPllReadback(pGpu, &rbNdiv, &rbLock);
+        /* One line per card in a fixed format: tools/hbmtune reads it. */
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s fbpas=%u\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  rbNdiv, 27U * rbNdiv, rbLock, CMP_TIMINGS_PCT_OF(pGpu),
+                  _cmpMclkWasSkipped(pGpu) ? "skipped" :
+                  ((source[0] == 's' && source[1] == 'a') ? "safe" : "stock"), rbLive);
+    }
+    else
+    {
+    const char *source = "build";
+    const NvU32 newNdiv = _cmpMclkNdivFor(pGpu, &source);
     NvU32 coeffPre, plmPre, newCoeff, cfg = 0;
     NvU32 i;
 
@@ -1301,6 +1647,16 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
     for (i = 0; i < 200000; i++)
     {
         cfg = GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_CFG);
+        if (CMP_IS_PRI_ERROR(cfg))      /* first FBPA silent (broadcast-cycle card): its lock bit cannot be polled */
+        {
+            NvU32 rbN, rbL;
+
+            (void)_cmpPllReadback(pGpu, &rbN, &rbL);
+            cfg = rbL ? 0x20U : 0U;
+            if (rbL || i > 2000)
+                break;
+            continue;
+        }
         if (cfg & 0x20U)
             break;
     }
@@ -1310,6 +1666,17 @@ cmpUnlockMclkPostGsp(OBJGPU *pGpu, KernelGsp *pKernelGsp)
               GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF),
               (GPU_REG_RD32(pGpu, CMP_REG_FBPA_PLL_COEFF) >> 8) & 0xFFU,
               cfg, (cfg >> 5) & 1U, i);
+
+    /* One line per card in a fixed format: tools/hbmtune reads it. */
+    {
+        NvU32 rbNdiv, rbLock, rbLive;
+
+        rbLive = _cmpPllReadback(pGpu, &rbNdiv, &rbLock);
+        NV_PRINTF(LEVEL_ERROR,
+                  "HBMPLL_OC: RESULT pci=%04x:%02x:%02x ndiv=%u mhz=%u lock=%u timings_pct=%d source=%s fbpas=%u\n",
+                  gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu),
+                  rbNdiv, 27U * rbNdiv, rbLock, CMP_TIMINGS_PCT_OF(pGpu), source, rbLive);
+    }
     }
 #endif
 
